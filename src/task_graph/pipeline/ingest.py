@@ -70,11 +70,41 @@ STATE_MAP: dict[SourceKind, dict[str, TaskState]] = {
         "inprogress": TaskState.ACTIVE,
         "completed": TaskState.DONE,
     },
+    # Verified against the live Agency calendar MCP, which reports either a
+    # show-as value, an invite response, or "cancelled".
+    SourceKind.CALENDAR: {
+        "cancelled": TaskState.DROPPED,
+        "declined": TaskState.DROPPED,
+        "organizer": TaskState.ACTIVE,
+        "accepted": TaskState.ACTIVE,
+        "tentativelyaccepted": TaskState.WAITING,
+        "tentative": TaskState.WAITING,
+        "notresponded": TaskState.TRIAGE,
+        "busy": TaskState.ACTIVE,
+        "oof": TaskState.WAITING,
+        "free": TaskState.TRIAGE,
+    },
+    # Teams messages carry no lifecycle of their own — the connector packs
+    # importance/unread flags into source_state — so they land in TRIAGE and
+    # are resolved by the user, which is the correct default for an inbound ask.
     SourceKind.MSX: {
+        # Sales stages: work is live until the deal reaches a terminal state.
+        "qualify": TaskState.ACTIVE,
+        "develop": TaskState.ACTIVE,
+        "propose": TaskState.ACTIVE,
+        "close": TaskState.ACTIVE,
         "open": TaskState.ACTIVE,
         "in progress": TaskState.ACTIVE,
+        "inprogress": TaskState.ACTIVE,
+        "blocked": TaskState.BLOCKED,
+        "on hold": TaskState.WAITING,
+        # Terminal states.
+        "won": TaskState.DONE,
+        "lost": TaskState.DROPPED,
         "completed": TaskState.DONE,
         "closed": TaskState.DONE,
+        "canceled": TaskState.DROPPED,
+        "cancelled": TaskState.DROPPED,
     },
 }
 

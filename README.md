@@ -77,9 +77,19 @@ servers and on-device embeddings.
 ```
 
 Connectors are MCP *clients* that spawn Microsoft Agency's first-party MCP
-servers (`agency mcp ado`, `agency mcp mail`, …), which already hold your
-domain-joined Entra session — so this project never handles a credential.
-GitHub uses the `gh` CLI you are already signed into.
+servers (`agency mcp ado`, `agency mcp mail`, `agency mcp teams`, …), which
+already hold your domain-joined Entra session — so this project never handles a
+credential. GitHub uses the `gh` CLI you are already signed into.
+
+Ingest is strictly read-only, and that is enforced rather than assumed: every
+tool name is tokenised and refused if it looks like a mutation. A substring
+check is not enough — Planner's `CreateTask` and Calendar's `DeleteEventById`
+would sail past one.
+
+Mail, Teams and Calendar each decide what actually counts as work. Being strict
+matters: an early version of the Teams heuristic surfaced 202 "tasks" from chat
+history, which is worse than having no Teams connector at all. It now returns
+one item per unanswered conversation, within a recent window.
 
 Dedupe combines BM25 and vector similarity via reciprocal rank fusion, but
 weights *evidence* over similarity: an explicit cross-reference auto-links,
@@ -129,10 +139,21 @@ and no credentials are stored anywhere.
 
 ## Status
 
-266 tests, all offline. Verified end-to-end on Windows on ARM64 against live
-GitHub and Agency's ADO and Mail MCP servers.
+Verified end-to-end on Windows on ARM64 against **live** GitHub and Agency's
+ADO, Mail, Teams, Calendar and Planner MCP servers. All tests run offline.
 
-Not yet implemented: Teams, Calendar and Planner connectors (the interface is
-built for them). MSX is read-and-propose only — its milestone state-transition
-semantics are undocumented, so that action refuses to execute until verified
-against a live tenant.
+| source | status |
+| --- | --- |
+| GitHub — issues, PRs, discussions, project boards | live |
+| Azure DevOps — work items | live |
+| Outlook mail | live |
+| Teams threads | live |
+| Calendar | live |
+| Planner | live |
+| MSX — opportunities, milestones, activities | implemented, **not reachable here** |
+
+MSX needs the `msx-mcp` plugin plus VPN; `agency mcp msx` does not exist on this
+machine, so the connector is tested offline against the documented tool surface
+and discovers real tool names at runtime. MSX remains read-and-propose only —
+its milestone and opportunity state-transition semantics are undocumented, so
+those actions refuse to execute until verified against a live tenant.

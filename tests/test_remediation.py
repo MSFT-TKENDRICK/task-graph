@@ -14,10 +14,14 @@ def test_all_actions_are_registered():
         "comment_github",
         "close_github_issue",
         "draft_mail_reply",
+        "draft_customer_email",
+        "advance_opportunity_stage",
         "advance_milestone",
         "post_teams_update",
+        "post_account_team_update",
     }
     assert get_action("advance_milestone").verified is False
+    assert get_action("advance_opportunity_stage").verified is False
 
 
 @pytest.mark.parametrize(
@@ -49,6 +53,29 @@ def test_all_actions_are_registered():
             "Draft mail reply to ada@example.com: Re: Launch",
         ),
         (
+            "draft_customer_email",
+            {
+                "recipients": ["alex@contoso.com", "lee@contoso.com"],
+                "subject": "Next steps",
+                "body": "Hello,\nPlease confirm next steps.",
+                "related_id": "opp-1",
+            },
+            (
+                "Draft customer email to alex@contoso.com, lee@contoso.com: Next steps\n\n"
+                "Hello,\nPlease confirm next steps."
+            ),
+        ),
+        (
+            "advance_opportunity_stage",
+            {
+                "opportunity_id": "opp-1",
+                "opportunity_name": "Contoso renewal",
+                "current_stage": "Propose",
+                "new_stage": "Close",
+            },
+            "Contoso renewal: Propose -> Close",
+        ),
+        (
             "advance_milestone",
             {"milestone_id": "msx-7", "current_status": "Qualify", "new_status": "Complete"},
             "Advance MSX milestone msx-7: Qualify \u2192 Complete",
@@ -57,6 +84,11 @@ def test_all_actions_are_registered():
             "post_teams_update",
             {"channel": "General", "message": "Ship update"},
             "Post Teams update to General: Ship update",
+        ),
+        (
+            "post_account_team_update",
+            {"destination": "chat-1", "message": "Stakeholder update"},
+            "Post account team update to chat-1:\n\nStakeholder update",
         ),
     ],
 )
@@ -115,4 +147,3 @@ def test_propose_remediations_creates_pending_objects_and_links_them(tmp_path):
         )
     finally:
         store.close()
-

@@ -104,6 +104,10 @@ provider.
 | `TASK_GRAPH_IDENTITY` | your email/UPN/aliases, for "assigned to me" scoring |
 | `TASK_GRAPH_ADO_ORG` | Azure DevOps organisation |
 | `TASK_GRAPH_ADO_PROJECTS` | comma-separated ADO projects |
+| `TASK_GRAPH_PLANNER_PLANS` | comma-separated Planner plan ids |
+
+Sources that need pinning tell you so, and list your real options in the error
+rather than making you go and find them.
 
 ## Scheduled syncs
 

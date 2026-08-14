@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import shutil
-from collections.abc import Mapping
+import tempfile
+from collections.abc import Container, Mapping
 from types import TracebackType
 from typing import Any, ClassVar
 
@@ -33,6 +36,7 @@ class AgencyMcpClient:
         self._stdio_cm: Any = None
         self._session_cm: Any = None
         self._session: Any = None
+        self._errlog: Any = None
 
     @classmethod
     def clear_probe_cache(cls) -> None:
@@ -48,12 +52,14 @@ class AgencyMcpClient:
         try:
             self._start_session()
         except Exception as exc:
+            detail = self._drain_stderr()
             self._teardown()
             if isinstance(exc, ConnectorError):
                 raise
-            raise ConnectorError(
-                f"Failed to start agency mcp {self.server_name}: {exc}"
-            ) from exc
+            message = f"Failed to start agency mcp {self.server_name}: {exc}"
+            if detail:
+                message = f"{message} ({detail})"
+            raise ConnectorError(message) from exc
         return self
 
     def _start_session(self) -> None:
@@ -65,6 +71,11 @@ class AgencyMcpClient:
         fails teardown with "attempted to exit cancel scope in a different
         task". A blocking portal keeps the whole lifecycle on one task in a
         dedicated thread, while still presenting a synchronous API here.
+
+        The child's stderr is captured to a temp file rather than inherited.
+        Agency writes banners and its own usage errors there, and letting them
+        through turns a cleanly-reported connector failure into console noise;
+        capturing it also lets the real reason go into the raised error.
         """
         try:
             from anyio.from_thread import start_blocking_portal
@@ -73,11 +84,17 @@ class AgencyMcpClient:
         except Exception as exc:
             raise ConnectorError(f"MCP Python SDK could not be imported: {exc}") from exc
 
+        self._errlog = tempfile.NamedTemporaryFile(  # noqa: SIM115 - closed in _teardown
+            mode="w+", encoding="utf-8", suffix=".stderr", delete=False
+        )
+
         self._portal_cm = start_blocking_portal()
         self._portal = self._portal_cm.__enter__()
 
         params = StdioServerParameters(command="agency", args=["mcp", self.server_name])
-        self._stdio_cm = self._portal.wrap_async_context_manager(stdio_client(params))
+        self._stdio_cm = self._portal.wrap_async_context_manager(
+            stdio_client(params, errlog=self._errlog)
+        )
         read_stream, write_stream = self._stdio_cm.__enter__()
 
         self._session_cm = self._portal.wrap_async_context_manager(
@@ -85,6 +102,18 @@ class AgencyMcpClient:
         )
         self._session = self._session_cm.__enter__()
         self._run(self._session.initialize)
+
+    def _drain_stderr(self, limit: int = 400) -> str:
+        """Tail of what the child process complained about, for error messages."""
+        if self._errlog is None:
+            return ""
+        try:
+            self._errlog.flush()
+            self._errlog.seek(0)
+            text = self._errlog.read().strip()
+        except (OSError, ValueError):
+            return ""
+        return text[-limit:]
 
     def __exit__(
         self,
@@ -103,11 +132,19 @@ class AgencyMcpClient:
                 cm.__exit__(None, None, None)
             except BaseException:  # noqa: BLE001 - cleanup is best effort
                 pass
+        if self._errlog is not None:
+            path = self._errlog.name
+            try:
+                self._errlog.close()
+                os.unlink(path)
+            except OSError:
+                pass
         self._session = None
         self._session_cm = None
         self._stdio_cm = None
         self._portal = None
         self._portal_cm = None
+        self._errlog = None
 
     def is_available(self) -> ConnectorStatus:
         cached = self._probe_cache.get(self.server_name)
@@ -185,6 +222,60 @@ class AgencyMcpClient:
             raise
         except Exception as exc:
             raise ConnectorError(f"agency mcp {self.server_name} failed: {exc}") from exc
+
+
+#: Verbs that mark an MCP tool as mutating. Ingest is read-only, so calling one
+#: is always a bug — and a dangerous one, since it would mean a routine sync
+#: writing to a source system.
+#:
+#: Matching is token-based rather than substring-based because MCP servers do
+#: not agree on naming: Agency's ADO server uses ``wit_work_item_write`` while
+#: its Planner server uses ``CreateTask``. A substring check for ``_write``
+#: silently allows every PascalCase mutation, which is precisely the hole this
+#: closes.
+MUTATING_VERBS: frozenset[str] = frozenset(
+    {
+        # Generic mutations.
+        "create", "update", "delete", "remove", "write", "upsert", "upload",
+        "add", "set", "post", "put", "patch", "send", "close", "archive",
+        "assign", "move", "rename", "edit", "modify", "publish", "submit",
+        "approve", "reject", "merge", "revert", "reset", "clear", "purge",
+        "drop", "insert", "save", "link", "unlink", "complete", "start",
+        # Calendar and mail verbs that mutate without looking like it: replying
+        # to an invite changes state on other people's calendars.
+        "cancel", "accept", "decline", "tentatively", "forward", "invite",
+        "schedule", "book", "reply", "respond", "dismiss", "snooze", "flag",
+        "mark", "share",
+    }
+)
+
+_TOKEN = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]+|\d+")
+
+
+def tool_name_tokens(name: str) -> list[str]:
+    """Split a tool name into lowercase words.
+
+    Handles ``snake_case``, ``camelCase``, ``PascalCase`` and acronyms, so
+    ``wit_work_item_write`` and ``CreateTask`` both tokenise usefully.
+    """
+    return [token.lower() for token in _TOKEN.findall(name.replace("_", " "))]
+
+
+def is_mutating_tool(name: str) -> bool:
+    return any(token in MUTATING_VERBS for token in tool_name_tokens(name))
+
+
+def assert_read_only(name: str, *, allow: Container[str] = frozenset()) -> None:
+    """Refuse to call ``name`` if it looks like a mutation.
+
+    Deliberately errs towards refusing: a false refusal is loud and easy to
+    override via ``allow``, whereas a false permit means an unattended sync
+    writing to ADO, Planner or MSX.
+    """
+    if name in allow:
+        return
+    if is_mutating_tool(name):
+        raise RuntimeError(f"Refusing to call mutating tool {name!r} during a read-only sync.")
 
 
 def extract_json_from_mcp_result(result: Any) -> Any:

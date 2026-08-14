@@ -33,6 +33,7 @@ from task_graph.learning.weights import Weights
 from task_graph.ontology.types import CLOSED_STATES, ObjectType, SourceKind
 from task_graph.pipeline import priority as priority_mod
 from task_graph.pipeline.approval import ApprovalQueue
+from task_graph.pipeline.crm import CrmProjector, CrmReport
 from task_graph.pipeline.dedupe import Deduper, DedupeReport
 from task_graph.pipeline.ingest import Ingestor, IngestReport
 from task_graph.pipeline.remediation import propose_remediations
@@ -45,12 +46,18 @@ _RUN_ID_KEY = "run_id"
 class SyncReport:
     ingest: IngestReport
     dedupe: DedupeReport
+    crm: CrmReport
     ranked: int = 0
     proposed_actions: int = 0
     errors: list[str] | None = None
 
     def summary(self) -> str:
-        parts = [self.ingest.summary(), self.dedupe.summary(), f"{self.ranked} tasks ranked"]
+        parts = [
+            self.ingest.summary(),
+            self.dedupe.summary(),
+            self.crm.summary(),
+            f"{self.ranked} tasks ranked",
+        ]
         if self.proposed_actions:
             parts.append(f"{self.proposed_actions} action(s) proposed")
         return "; ".join(parts)
@@ -79,6 +86,7 @@ class TaskGraphApp:
         self.deduper = Deduper(
             self.graph, self.store, self.weights, self.search, self.embedder
         )
+        self.crm_projector = CrmProjector(self.graph, self.store)
         self.corrector = Corrector(self.graph, self.store, self.weights)
         self.approvals = ApprovalQueue(self.graph)
 
@@ -146,6 +154,11 @@ class TaskGraphApp:
         ingest_report.errors.extend(errors)
 
         dedupe_report = self.deduper.run() if dedupe else DedupeReport()
+        try:
+            crm_report = self.crm()
+        except Exception as exc:  # CRM context must not make source sync fail
+            errors.append(f"crm: {exc}")
+            crm_report = CrmReport(errors=[str(exc)])
         ranked = self.rank() if rank else []
 
         proposed = 0
@@ -156,6 +169,7 @@ class TaskGraphApp:
         return SyncReport(
             ingest=ingest_report,
             dedupe=dedupe_report,
+            crm=crm_report,
             ranked=len(ranked),
             proposed_actions=proposed,
             errors=errors,
@@ -178,6 +192,9 @@ class TaskGraphApp:
         return priority_mod.persist_scores(
             self.graph, self.store, self.weights, now=now, identity=self.identity()
         )
+
+    def crm(self) -> CrmReport:
+        return self.crm_projector.run()
 
     def triage(self, limit: int = 20) -> list[tuple[Object, Any]]:
         """The ranked list of open work — the system's primary answer."""
@@ -344,6 +361,7 @@ class TaskGraphApp:
         self.deduper = Deduper(
             self.graph, self.store, self.weights, self.search, self.embedder
         )
+        self.crm_projector = CrmProjector(self.graph, self.store)
         self.corrector = Corrector(self.graph, self.store, self.weights)
         self.approvals = ApprovalQueue(self.graph)
 

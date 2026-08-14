@@ -476,6 +476,7 @@ def _sync_report(report: SyncReport) -> dict[str, Any]:
         "summary": report.summary(),
         "ingest": report.ingest.__dict__,
         "dedupe": report.dedupe.__dict__,
+        "crm": report.crm.__dict__,
         "ranked": report.ranked,
         "proposed_actions": report.proposed_actions,
         "errors": report.errors or [],

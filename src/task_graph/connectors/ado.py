@@ -16,7 +16,13 @@ from task_graph.connectors.base import (
     extract_external_refs,
     parse_datetime,
 )
-from task_graph.connectors.mcp_client import AgencyMcpClient, extract_json_from_mcp_result
+from task_graph.connectors.mcp_client import (
+    MUTATING_VERBS,
+    AgencyMcpClient,
+    assert_read_only,
+    extract_json_from_mcp_result,
+    is_mutating_tool,
+)
 from task_graph.ontology.types import SourceKind
 
 #: Pin the organisation and projects to skip discovery, which costs an extra
@@ -263,26 +269,17 @@ def _tool_names(tools: list[Any]) -> list[str]:
     return names
 
 
-#: Name fragments that mark an MCP tool as mutating. Ingest is read-only, so
-#: selecting one of these is always a bug — and a dangerous one, since it would
-#: mean a routine sync writing to a source system.
-_MUTATING_MARKERS = ("_write", "_upsert", "_create", "_delete", "_upload", "_remove")
-
-
-def _assert_read_only(tool: str) -> None:
-    lowered = tool.lower()
-    if any(marker in lowered for marker in _MUTATING_MARKERS):
-        raise RuntimeError(
-            f"Refusing to call mutating tool {tool!r} during a read-only sync."
-        )
+#: Backwards-compatible aliases. The real implementation lives in
+#: ``mcp_client`` because every connector needs it, not just ADO.
+_MUTATING_MARKERS = MUTATING_VERBS
+_assert_read_only = assert_read_only
 
 
 def _pick_tool(tools: list[str], *, required: tuple[str, ...], preferred: tuple[str, ...]) -> str:
     candidates = [
         tool
         for tool in tools
-        if all(part in tool.lower() for part in required)
-        and not any(marker in tool.lower() for marker in _MUTATING_MARKERS)
+        if all(part in tool.lower() for part in required) and not is_mutating_tool(tool)
     ]
     if not candidates:
         raise RuntimeError(
