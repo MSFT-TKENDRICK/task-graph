@@ -1,0 +1,17 @@
+[
+  {
+    "repository": {"nameWithOwner": "Octo/Repo"},
+    "number": 45,
+    "title": "Review connector PR",
+    "body": "Implements task graph connector work.",
+    "url": "https://github.com/Octo/Repo/pull/45",
+    "state": "OPEN",
+    "author": {"login": "me"},
+    "assignees": [],
+    "labels": [{"name": "enhancement"}],
+    "createdAt": "2026-08-03T00:00:00Z",
+    "updatedAt": "2026-08-04T00:00:00Z",
+    "type": "PullRequest",
+    "isPullRequest": true
+  }
+]

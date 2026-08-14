@@ -1,0 +1,51 @@
+[project]
+name = "task-graph"
+version = "0.1.0"
+description = "Local-first, event-sourced unified task graph across mail, Teams, GitHub, ADO and MSX"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+dependencies = [
+    "activegraph>=1.10.0",
+    "click>=8,<9",
+    "pydantic>=2",
+    "numpy>=2",
+    "httpx>=0.27",
+    # Capped below 1.20: from 1.20 onwards the SDK depends on `pyjwt[crypto]`,
+    # which pulls in `cryptography`. cryptography publishes no win_arm64 wheel
+    # for any version, and `mcp` imports it unconditionally at package import,
+    # so on Windows on ARM the whole SDK becomes unimportable. 1.19 has the
+    # full stdio client and server surface this project needs.
+    "mcp>=1.2,<1.20",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+tg = "task_graph.cli:main"
+task-graph-mcp = "task_graph.mcpserver.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/task_graph"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error::DeprecationWarning:task_graph.*"]
