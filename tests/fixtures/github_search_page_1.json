@@ -1,0 +1,17 @@
+[
+  {
+    "repository": {"nameWithOwner": "Octo/Repo"},
+    "number": 123,
+    "title": "Fix sync for AB#12345",
+    "body": "See #77 and https://example.com/spec.",
+    "url": "https://github.com/Octo/Repo/issues/123",
+    "state": "OPEN",
+    "author": {"login": "alice"},
+    "assignees": [{"login": "me"}],
+    "labels": [{"name": "bug"}],
+    "createdAt": "2026-08-01T00:00:00Z",
+    "updatedAt": "2026-08-02T00:00:00Z",
+    "type": "Issue",
+    "isPullRequest": false
+  }
+]
