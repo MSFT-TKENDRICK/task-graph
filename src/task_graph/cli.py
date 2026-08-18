@@ -15,6 +15,7 @@ from typing import Any
 import click
 from activegraph import Object
 
+from task_graph import __version__
 from task_graph.app import SyncReport, TaskGraphApp
 from task_graph.config import (
     DEFAULT_FOUNDRY_ENDPOINT,
@@ -25,6 +26,7 @@ from task_graph.config import (
 from task_graph.learning.corrections import LearningReport
 from task_graph.ontology.types import ObjectType
 from task_graph.pipeline.approval import ApprovalRequiredError, RemediationExecutionError
+from task_graph.shell import banner_for, run_shell
 from task_graph.store import SCHEMA_VERSION
 
 
@@ -435,6 +437,51 @@ def rebuild(ctx: click.Context) -> None:
     with _with_app(ctx) as app:
         data = app.rebuild()
     _render(ctx, data, lambda: "\n".join(f"{k}: {v}" for k, v in data.items()))
+
+
+@main.command()
+@click.option(
+    "--command",
+    "-c",
+    "commands",
+    multiple=True,
+    help="Run a command and exit instead of prompting; repeatable.",
+)
+@click.pass_context
+def shell(ctx: click.Context, commands: tuple[str, ...]) -> None:
+    """Start an interactive tg shell.
+
+    Every tg command is available without the `tg` prefix, and they all share
+    one process - so only the first one pays the import cost.
+    """
+    settings = _settings_from_context(ctx)
+    base_args = _inherited_args(ctx)
+    if commands:
+        status_code = run_shell(main, base_args=base_args, lines=list(commands))
+    else:
+        status_code = run_shell(
+            main,
+            base_args=base_args,
+            banner=banner_for(__version__, settings.home),
+        )
+    ctx.exit(status_code)
+
+
+def _inherited_args(ctx: click.Context) -> list[str]:
+    """Rebuild the group-level options this shell was started with.
+
+    They are replayed ahead of every line so that `tg --json shell` keeps
+    emitting JSON, while a line remains free to say `--no-json` and win.
+    """
+    obj = ctx.obj or {}
+    args: list[str] = []
+    home = obj.get("home")
+    if home:
+        args += ["--home", str(home)]
+    if obj.get("json"):
+        args.append("--json")
+    args += ["-v"] * int(obj.get("verbose") or 0)
+    return args
 
 
 @main.command("init")

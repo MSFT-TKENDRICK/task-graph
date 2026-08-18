@@ -12,24 +12,34 @@
 ## Install
 
 ```powershell
-uv venv
-uv pip install -e ".[dev]"
+.\run.ps1 setup
 ```
 
-**On the Microsoft corporate network** package downloads are routed through an
-internal proxy and `files.pythonhosted.org` is blocked. `pip` picks this up from
-`C:\ProgramData\pip\pip.ini` automatically; `uv` does not, so pass the index
-explicitly and use the platform certificate store:
+That creates `.venv`, installs task-graph editable with its dev dependencies,
+and is idempotent — re-run it any time. It is also exactly what the GitHub
+Copilot app runs as its Setup script, so there is one provisioning path rather
+than two that drift apart.
+
+**On the Microsoft corporate network** `files.pythonhosted.org` refuses the TLS
+handshake outright, so the default PyPI index cannot serve wheels at all and a
+bare `uv pip install` dies on the first package. pip already knows the internal
+mirror — it is configured machine-wide in `C:\ProgramData\pip\pip.ini` — so
+setup asks pip for its own effective index and hands that to uv, rather than
+hard-coding a Microsoft-internal URL into the repository. Off the corporate
+network pip reports nothing, uv uses PyPI, and the same code path is correct.
+
+uv is used when it is installed (about 40 seconds here) and pip is the fallback
+(about two minutes). To do it by hand:
 
 ```powershell
-$env:UV_INDEX_URL = 'https://packagefeedproxy.microsoft.io/pypi/simple/'
-uv pip install --native-tls -e ".[dev]"
+python -m venv .venv
+.venv\Scripts\python -m pip install -e ".[dev]"    # pip reads pip.ini itself
 ```
 
 Then check everything:
 
 ```powershell
-tg doctor
+.\run.ps1 doctor
 ```
 
 ```
@@ -43,6 +53,11 @@ tg doctor
 
 `tg doctor` exits non-zero only on critical failures; a degraded embedder or a
 missing optional connector is reported but tolerated.
+
+Examples below are written as `tg`, which is the console script inside `.venv`.
+Either activate the virtualenv (`.venv\Scripts\Activate.ps1`) or put `.\run.ps1`
+in front — unknown tasks are forwarded to `tg` unchanged, so `.\run.ps1 init
+--dry-run` and `tg init --dry-run` are the same command.
 
 ## Register the MCP server
 
@@ -123,18 +138,54 @@ schtasks /create /tn "task-graph sync" /tr "C:\path\to\.venv\Scripts\tg.exe sync
 ## Daily use
 
 ```powershell
-tg sync
-tg triage                       # what to do next, and why
-tg why <task-id>                # the full factor breakdown
-tg merges                       # duplicates awaiting your call
-tg approve merge <patch-id>
-tg reject merge <patch-id> --reason "different releases"
-tg correct <task-id> --not-a-task --reason "newsletter"
-tg learn                        # fold those corrections into the weights
+.\run.ps1 sync
+.\run.ps1 shell                 # then type the commands below without the `tg`
 ```
 
-Corrections only change behaviour after `tg learn`, which reports exactly which
+```
+tg> triage                      # what to do next, and why
+tg> why <task-id>               # the full factor breakdown
+tg> merges                      # duplicates awaiting your call
+tg> approve merge <patch-id>
+tg> reject merge <patch-id> --reason "different releases"
+tg> correct <task-id> --not-a-task --reason "newsletter"
+tg> learn                       # fold those corrections into the weights
+tg> exit
+```
+
+The shell is the same CLI dispatched inside one process, so only the first
+command pays the import cost. A leading `tg` is accepted and ignored, `help`
+lists the commands, group options work (`--json triage`), and a command that
+fails prints its error and leaves you at the prompt. Anything you can type
+there also works as `tg <command>` or `.\run.ps1 <command>`, and
+`tg shell -c triage -c merges` runs a fixed sequence without prompting.
+
+Corrections only change behaviour after `learn`, which reports exactly which
 weights moved.
+
+## Running from the GitHub Copilot app
+
+`.github/github-app.yml` wires two scripts:
+
+| script | command | when |
+| --- | --- | --- |
+| Setup | `python scripts/app_setup.py` | on session create |
+| Run | `python scripts/app_run.py` | the Run button |
+
+Both are stdlib-only and import nothing from `task_graph`, because they run
+before the virtualenv exists and from whichever shell the app chooses. Run
+provisions the environment first, so pressing Run on a session whose setup was
+skipped repairs it rather than failing.
+
+The app asks you to review and accept the configuration the first time it sees
+it, and again after any edit — including whitespace. Until you accept it, the
+app keeps using whatever was configured in the UI.
+
+Run opens the interactive shell when it has a terminal on both ends, which the
+app's Terminal panel gives it. The script-runner pane pipes stdout, so a prompt
+there would wait for a typist who cannot reach it; there it prints `doctor` and
+`triage` instead and names the command that gets you the real shell. Override
+the detection with `TASK_GRAPH_RUN_INTERACTIVE=1` or `=0`.
 
 ## Troubleshooting
 

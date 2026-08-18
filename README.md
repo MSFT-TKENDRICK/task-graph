@@ -37,18 +37,35 @@ what needs doing, and closing work out means visiting each system in turn.
 ## Quick start
 
 ```powershell
-uv venv
-uv pip install -e ".[dev]"     # add --native-tls on the Microsoft network
+.\run.ps1 setup   # creates .venv, installs editable, picks the right package index
 
-tg doctor       # what's wired up, what needs attention
-tg sync         # pull from every available source
-tg triage       # what to do next, and why
+.\run.ps1 doctor  # what's wired up, what needs attention
+.\run.ps1 sync    # pull from every available source
+.\run.ps1 triage  # what to do next, and why
+```
+
+`.\run.ps1` on its own lists every task, and anything it doesn't define is
+forwarded to `tg` — so `.\run.ps1 why <id>` works. Activate the virtualenv
+(`.venv\Scripts\Activate.ps1`) if you'd rather type `tg` directly.
+
+Triage is a conversation with the tool rather than one command, so there is a
+shell that keeps the process warm — the imports cost about a second and a half,
+and this pays them once instead of once per command:
+
+```powershell
+.\run.ps1 shell
+```
+```
+tg> triage
+tg> why task-a1b2c3
+tg> correct task-a1b2c3 --lower --reason "not this sprint"
+tg> exit
 ```
 
 Then wire it into Copilot so you can just ask:
 
 ```powershell
-tg init         # registers the MCP server in ~/.copilot/mcp-config.json
+.\run.ps1 init   # registers the MCP server in ~/.copilot/mcp-config.json
 ```
 
 > *"What should I work on today?"*
@@ -115,9 +132,21 @@ trade-offs, including why vector search is brute-force numpy rather than
 | `tg correct ID --not-a-task/--higher/--lower` | teach it |
 | `tg learn` | fold corrections into the weights |
 | `tg weights` | inspect or set tuning parameters |
+| `tg shell` | interactive prompt; one process, no restart cost |
 | `tg status` / `tg doctor` / `tg rebuild` / `tg init` | operations |
 
 Every command supports `--json`.
+
+## Running it from the GitHub Copilot app
+
+`.github/github-app.yml` configures the project, so **Setup** provisions `.venv`
+when a session is created and **Run** opens the `tg` shell. The app asks you to
+review and accept the configuration the first time it sees it.
+
+The Run button opens the interactive shell when it has a terminal — the app's
+Terminal panel does. The script-runner pane pipes stdout, so nothing typed there
+would ever arrive; it prints `doctor` and `triage` instead, and tells you the one
+command that gets you the prompt. Force either with `TASK_GRAPH_RUN_INTERACTIVE`.
 
 ## MCP tools
 
