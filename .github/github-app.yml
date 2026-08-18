@@ -1,0 +1,40 @@
+# Repository configuration for the GitHub Copilot app.
+# https://docs.github.com/copilot/reference/github-copilot-app-reference/repository-configuration
+#
+# Both scripts are thin: every platform-specific decision is made inside the
+# Python files, because the app's shell is not guaranteed to be PowerShell and
+# `.venv` is never on PATH when they start.
+
+instructions: |
+  task-graph is a Python 3.11+ package installed editable into `.venv`.
+
+  - Provision with `.\run.ps1 setup` (or `python scripts/app_setup.py`). Do not
+    run a bare `uv pip install`: on the Microsoft corporate network
+    files.pythonhosted.org refuses the TLS handshake, so the default PyPI index
+    cannot serve wheels at all. The setup script reads the machine's configured
+    index from pip and passes it to uv, falling back to pip.
+  - Run the tests with `.\run.ps1 test`; they are all offline. Lint with
+    `.\run.ps1 lint` (ruff, line length 100).
+  - All state lives in `~/.task-graph` (`TASK_GRAPH_HOME`), never in the repo,
+    and no credentials are stored anywhere. `events.db` is the source of truth;
+    `graph.db` is a disposable projection rebuilt by `tg rebuild`.
+  - Ingest is strictly read-only, and enforced: connectors refuse any tool whose
+    name tokenises as a mutation. Remediation is proposed, never applied without
+    an explicit approval, and `approve` and `execute` stay separate steps.
+  - Keep the `mcp>=1.2,<1.20` pin. From 1.20 the SDK requires `cryptography`,
+    which publishes no win_arm64 wheel, and this project targets Windows on ARM.
+
+scripts:
+  - name: Setup
+    command: python scripts/app_setup.py
+    triggers:
+      - session.create
+  - name: Run
+    command: python scripts/app_run.py
+
+# task-graph is a CLI, not a server: nothing prints a URL and there is nothing
+# to preview, so leave the browser alone.
+auto_open_in_browser: false
+
+automation:
+  auto_issue_session: true
