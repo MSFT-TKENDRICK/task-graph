@@ -13,6 +13,8 @@ def test_all_actions_are_registered():
         "update_ado_state",
         "comment_github",
         "close_github_issue",
+        "comment_github_pr",
+        "close_github_pr",
         "draft_mail_reply",
         "draft_customer_email",
         "advance_opportunity_stage",
@@ -147,3 +149,61 @@ def test_propose_remediations_creates_pending_objects_and_links_them(tmp_path):
         )
     finally:
         store.close()
+
+
+def _pr_task(graph, *, title="Add the thing", state=TaskState.ACTIVE.value, number=9):
+    """A task backed by a GitHub *pull request*, which is what real syncs give."""
+    source = graph.add_object(
+        ObjectType.SOURCE_ITEM,
+        {
+            "source": SourceKind.GITHUB,
+            "source_uri": f"github:pr:owner/repo#{number}",
+            "title": title,
+            "body": "A long pull request description that must not be echoed back.",
+            "source_state": "open",
+        },
+    )
+    task = graph.add_object(
+        ObjectType.TASK,
+        {"title": title, "state": state, "summary": source.data["body"]},
+    )
+    graph.add_relation(source.id, task.id, RelationType.EVIDENCE_OF)
+    return task
+
+
+def test_pull_requests_get_proposals(tmp_path):
+    """Every task from a real GitHub sync was a PR, and no rule matched one."""
+    graph = Graph(graph_store=SqliteGraphStore(tmp_path / "g.db"))
+    task = _pr_task(graph)
+
+    proposals = propose_remediations(graph, task)
+    assert [p.data["action"] for p in proposals] == ["comment_github_pr"]
+    assert p_target(proposals[0]) == "github:pr:owner/repo#9"
+
+
+def test_a_done_pull_request_is_proposed_for_closing(tmp_path):
+    graph = Graph(graph_store=SqliteGraphStore(tmp_path / "g.db"))
+    task = _pr_task(graph, title="Fixed the thing, all complete")
+
+    actions = {p.data["action"] for p in propose_remediations(graph, task)}
+    assert actions == {"close_github_pr"}
+
+
+def test_a_draft_comment_never_echoes_the_source_body(tmp_path):
+    """Proposing a PR's own description back onto that PR is not a comment."""
+    graph = Graph(graph_store=SqliteGraphStore(tmp_path / "g.db"))
+    task = _pr_task(graph)
+
+    body = propose_remediations(graph, task)[0].data["params"]["body"]
+    assert "must not be echoed back" not in body
+    assert len(body) < 300
+
+
+def test_pr_actions_reach_the_pull_request_endpoints():
+    """`gh issue` refuses a PR number, so the PR actions must not use it."""
+    assert get_action("comment_github_pr").target_source is SourceKind.GITHUB
+    assert get_action("close_github_pr").target_source is SourceKind.GITHUB
+
+
+def p_target(proposal):
+    return proposal.data["target_uri"]

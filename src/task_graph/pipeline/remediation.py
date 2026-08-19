@@ -235,6 +235,42 @@ def _preview_close_github_issue(
     return f"Close GitHub issue {params['owner_repo']}#{params['number']}"
 
 
+def _execute_comment_github_pr(client: Any, params: dict[str, Any]) -> str:
+    return _call_client(
+        client,
+        "comment_github_pr",
+        "github_comment_pr",
+        {"owner_repo": params["owner_repo"], "number": params["number"], "body": params["body"]},
+    )
+
+
+@remediation_action("comment_github_pr", SourceKind.GITHUB, GitHubCommentParams)
+def _preview_comment_github_pr(
+    task: Object | Mapping[str, Any] | None, params: dict[str, Any]
+) -> str:
+    return f"Comment on GitHub PR {params['owner_repo']}#{params['number']}: {params['body']}"
+
+
+def _execute_close_github_pr(client: Any, params: dict[str, Any]) -> str:
+    return _call_client(
+        client,
+        "close_github_pr",
+        "github_close_pr",
+        {
+            "owner_repo": params["owner_repo"],
+            "number": params["number"],
+            "reason": params.get("reason"),
+        },
+    )
+
+
+@remediation_action("close_github_pr", SourceKind.GITHUB, GitHubCloseIssueParams)
+def _preview_close_github_pr(
+    task: Object | Mapping[str, Any] | None, params: dict[str, Any]
+) -> str:
+    return f"Close GitHub pull request {params['owner_repo']}#{params['number']}"
+
+
 def _execute_draft_mail_reply(client: Any, params: dict[str, Any]) -> str:
     return _call_client(
         client,
@@ -473,9 +509,19 @@ def _propose_github_close(task: Object, source_item: Object) -> RemediationProps
         return None
     uri = str(source_item.data.get("source_uri") or "")
     state = str(source_item.data.get("source_state") or "").lower()
-    if ":issue:" not in uri or state not in {"open", ""} or _task_state(task) != "done_intent":
+    kind = _github_kind(uri)
+    if kind is None or state not in {"open", ""} or _task_state(task) != "done_intent":
         return None
     owner_repo, number = _parse_github_uri(uri)
+    if kind == "pr":
+        return _build_proposal(
+            "close_github_pr",
+            uri,
+            {"owner_repo": owner_repo, "number": number},
+            task,
+            "The task appears complete while the pull request is still open.",
+            0.6,
+        )
     return _build_proposal(
         "close_github_issue",
         uri,
@@ -490,9 +536,19 @@ def _propose_github_comment(task: Object, source_item: Object) -> RemediationPro
     if source_item.data.get("source") != SourceKind.GITHUB:
         return None
     uri = str(source_item.data.get("source_uri") or "")
-    if ":issue:" not in uri or _task_state(task) == "done_intent":
+    kind = _github_kind(uri)
+    if kind is None or _task_state(task) == "done_intent":
         return None
     owner_repo, number = _parse_github_uri(uri)
+    if kind == "pr":
+        return _build_proposal(
+            "comment_github_pr",
+            uri,
+            {"owner_repo": owner_repo, "number": number, "body": _status_message(task)},
+            task,
+            "A concise approved comment would move the pull request forward.",
+            0.5,
+        )
     return _build_proposal(
         "comment_github",
         uri,
@@ -718,10 +774,26 @@ def _task_state(task: Object) -> str:
     return str(task.data.get("state") or "")
 
 
+#: Previews are what you read before approving, so a draft body has to fit on
+#: screen. Anything longer is a wall of text nobody actually reviews.
+_MAX_STATUS_CHARS = 200
+
+
 def _status_message(task: Object) -> str:
-    summary = str(task.data.get("summary") or "").strip()
-    title = str(task.data.get("title") or "this task").strip()
-    return summary if summary else f"Update on {title}: work is in progress."
+    """A short draft note for a comment, reply or channel update.
+
+    Deliberately *not* the task summary verbatim. For a GitHub item the summary
+    is that item's own body, so echoing it proposes posting a pull request's
+    description back onto the pull request -- which is what this used to do,
+    invisibly, because no GitHub rule ever fired against real data.
+
+    What is proposed here is a draft for a human to approve and edit; being
+    short and obviously generic is more honest than being long and wrong.
+    """
+    title = " ".join(str(task.data.get("title") or "this task").split())
+    if len(title) > _MAX_STATUS_CHARS:
+        title = title[:_MAX_STATUS_CHARS].rstrip() + "..."
+    return f"Status update on {title}: still open and in progress."
 
 
 def _related_objects(
@@ -806,8 +878,22 @@ def _name(obj: Object | None, fallback: str) -> str:
 
 
 def _parse_github_uri(uri: str) -> tuple[str, int]:
-    _, _, rest = uri.partition("github:issue:")
+    """Split ``github:issue:owner/repo#12`` or ``github:pr:owner/repo#12``."""
+    rest = ""
+    for prefix in ("github:issue:", "github:pr:"):
+        if prefix in uri:
+            _, _, rest = uri.partition(prefix)
+            break
     owner_repo, _, number = rest.partition("#")
     if not owner_repo or not number:
-        raise RemediationError(f"Invalid GitHub issue URI: {uri}")
+        raise RemediationError(f"Invalid GitHub URI: {uri}")
     return owner_repo, int(number)
+
+
+def _github_kind(uri: str) -> str | None:
+    """Which sort of GitHub thing this is, or None if it is neither."""
+    if ":issue:" in uri:
+        return "issue"
+    if ":pr:" in uri:
+        return "pr"
+    return None

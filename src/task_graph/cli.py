@@ -422,7 +422,29 @@ def action_list(
                 )
                 return
         found = [_remediation_dict(obj) for obj in app.approvals.by_state(wanted)]
-    _render(ctx, found, lambda: _format_actions(found))
+        hint = _no_actions_hint(app, states, show_all)
+    _render(ctx, found, lambda: _format_actions(found) if found else hint)
+
+
+def _no_actions_hint(app: TaskGraphApp, states: tuple[str, ...], show_all: bool) -> str:
+    """Say what would actually produce an action.
+
+    The old message was "No pending actions found. Run `tg sync` first," which
+    is a dead end: a plain sync never proposes anything, so following the
+    advice changes nothing and the advice repeats. What is missing depends on
+    where you are -- no tasks at all, or tasks nobody has proposed against.
+    """
+    if not app.store.find_objects(ObjectType.TASK.value):
+        return "No tasks found. Run `tg sync` first."
+    if app.approvals.by_state(None):
+        scope = "with that state" if (states or show_all) else "pending or granted"
+        return f"No actions {scope}. Try `tg action list --all`."
+    return (
+        "No actions proposed yet. Proposing is a separate step so a scheduled "
+        "sync never fills this queue:\n"
+        "  tg sync --propose            propose for everything\n"
+        "  tg action propose <task-id>  propose for one task"
+    )
 
 
 def _wanted_states(states: tuple[str, ...], show_all: bool) -> set[ApprovalState] | None:
@@ -444,7 +466,13 @@ def action_propose(ctx: click.Context, task_id: str) -> None:
         except KeyError:
             _render(ctx, {"error": "task_not_found", "task_id": task_id}, _empty_message("task"))
             return
-    _render(ctx, proposed, lambda: _format_actions(proposed))
+    _render(
+        ctx,
+        proposed,
+        lambda: _format_actions(proposed)
+        if proposed
+        else f"Nothing to propose for {task_id}; no rule matched it.",
+    )
 
 
 @action.command("preview")

@@ -129,6 +129,7 @@ separately.
 | `tg search Q` (`find`) | hybrid lexical + semantic search |
 | `tg correct ID` (`fix`) | teach it |
 | `tg sync` (`pull`) | pull from sources, unify, rank |
+| `tg sync --propose` | ...and propose remediations for what it finds |
 | `tg merge list\|approve\|reject` (`m`) | duplicate decisions |
 | `tg action list\|propose\|preview\|approve\|execute\|reject` (`a`) | proposed remediations |
 | `tg job list\|logs\|cancel\|start` (`j`) | background work |
@@ -151,6 +152,15 @@ tg action execute r7     # the step that mutates the source system
 
 `tg action list` shows granted actions as well as pending ones — an approved
 action is exactly the one you still have to execute.
+
+**Actions are proposed on demand, not by every sync.** A plain `tg sync` pulls
+and ranks but proposes nothing, so a scheduled sync never fills your approval
+queue. Ask for proposals explicitly:
+
+```powershell
+tg sync --propose             # propose across everything it just pulled
+tg action propose <task-id>   # propose for one task
+```
 
 ## Nothing blocks
 

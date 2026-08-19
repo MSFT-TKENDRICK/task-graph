@@ -187,6 +187,15 @@ tg action approve r7       # grants; nothing happens anywhere
 tg action execute r7       # mutates the source system
 ```
 
+Nothing is proposed until you ask. A plain `tg sync` pulls and ranks and
+proposes nothing, so a scheduled sync never fills the queue — use
+`tg sync --propose`, or `tg action propose <task-id>` for one task.
+
+GitHub pull requests are proposed against as well as issues. They need separate
+actions rather than a looser rule, because `gh issue comment` refuses a pull
+request number outright ("Could not resolve to an Issue"), so the PR proposals
+go through `gh pr comment` and `gh pr close`.
+
 `action list` deliberately shows granted actions alongside pending ones: a
 granted action is precisely the one still waiting to be executed, so hiding it
 at the moment of approval loses it when it matters most.

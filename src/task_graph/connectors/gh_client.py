@@ -66,6 +66,16 @@ class GitHubCliClient:
         )
         return f"Commented on {owner_repo}#{number}"
 
+    def comment_github_pr(self, owner_repo: str, number: int | str, body: str, **_: Any) -> str:
+        """Comment on a pull request.
+
+        Separate from :meth:`comment_github` because `gh issue` refuses a pull
+        request number outright -- "Could not resolve to an Issue" -- even
+        though the REST API treats the two the same.
+        """
+        self._run(["pr", "comment", str(number), "--repo", owner_repo, "--body", body])
+        return f"Commented on {owner_repo}#{number}"
+
     def close_github_issue(
         self, owner_repo: str, number: int | str, reason: str | None = None, **_: Any
     ) -> str:
@@ -75,8 +85,19 @@ class GitHubCliClient:
         self._run(args)
         return f"Closed {owner_repo}#{number}"
 
+    def close_github_pr(
+        self, owner_repo: str, number: int | str, reason: str | None = None, **_: Any
+    ) -> str:
+        args = ["pr", "close", str(number), "--repo", owner_repo]
+        if reason:
+            args += ["--comment", reason]
+        self._run(args)
+        return f"Closed pull request {owner_repo}#{number}"
+
 
 _TOOLS = {
     "github_comment": lambda c, a: c.comment_github(**a),
     "github_close_issue": lambda c, a: c.close_github_issue(**a),
+    "github_comment_pr": lambda c, a: c.comment_github_pr(**a),
+    "github_close_pr": lambda c, a: c.close_github_pr(**a),
 }
