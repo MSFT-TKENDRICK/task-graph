@@ -1,0 +1,1 @@
+10 new, 0 updated, 0 unchanged, 20 embedded, 3 errors; 44 pairs considered, 1 auto-linked, 0 proposed for review; 3 CRM entities projected, 3 CRM relation(s) linked; 0 tasks ranked

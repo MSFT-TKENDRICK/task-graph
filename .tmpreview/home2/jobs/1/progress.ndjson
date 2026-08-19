@@ -1,0 +1,44 @@
+{"kind": "phase", "phase": "starting", "message": "opening the graph", "current": 0, "total": 0, "at": "2026-08-19T15:09:24.501993+00:00"}
+{"kind": "log", "phase": "starting", "message": "opening the projection", "current": 0, "total": 0, "at": "2026-08-19T15:09:24.502921+00:00"}
+{"kind": "log", "phase": "starting", "message": "reading the event log", "current": 0, "total": 0, "at": "2026-08-19T15:09:24.527208+00:00"}
+{"kind": "log", "phase": "starting", "message": "loading learned weights", "current": 0, "total": 0, "at": "2026-08-19T15:09:24.534671+00:00"}
+{"kind": "log", "phase": "starting", "message": "preparing the embedder", "current": 0, "total": 0, "at": "2026-08-19T15:09:24.535124+00:00"}
+{"kind": "log", "phase": "starting", "message": "opening the search index", "current": 0, "total": 0, "at": "2026-08-19T15:09:26.982443+00:00"}
+{"kind": "phase", "phase": "probing", "message": "", "current": 0, "total": 7, "at": "2026-08-19T15:09:26.983126+00:00"}
+{"kind": "advance", "phase": "probing", "message": "msx checked", "current": 1, "total": 7, "at": "2026-08-19T15:09:27.529918+00:00"}
+{"kind": "advance", "phase": "probing", "message": "github checked", "current": 2, "total": 7, "at": "2026-08-19T15:09:28.049131+00:00"}
+{"kind": "advance", "phase": "probing", "message": "mail checked", "current": 3, "total": 7, "at": "2026-08-19T15:09:31.476962+00:00"}
+{"kind": "advance", "phase": "probing", "message": "calendar checked", "current": 4, "total": 7, "at": "2026-08-19T15:09:32.054875+00:00"}
+{"kind": "advance", "phase": "probing", "message": "ado checked", "current": 5, "total": 7, "at": "2026-08-19T15:09:32.055660+00:00"}
+{"kind": "advance", "phase": "probing", "message": "planner checked", "current": 6, "total": 7, "at": "2026-08-19T15:09:32.771749+00:00"}
+{"kind": "advance", "phase": "probing", "message": "teams checked", "current": 7, "total": 7, "at": "2026-08-19T15:09:36.517419+00:00"}
+{"kind": "phase", "phase": "sources", "message": "", "current": 0, "total": 6, "at": "2026-08-19T15:09:36.518348+00:00"}
+{"kind": "log", "phase": "sources", "message": "github: connecting", "current": 0, "total": 6, "at": "2026-08-19T15:09:36.518876+00:00"}
+{"kind": "advance", "phase": "sources", "message": "github: 5 items", "current": 1, "total": 6, "at": "2026-08-19T15:09:43.793800+00:00"}
+{"kind": "log", "phase": "sources", "message": "ado: connecting", "current": 1, "total": 6, "at": "2026-08-19T15:09:43.794605+00:00"}
+{"kind": "advance", "phase": "sources", "message": "ado: failed", "current": 2, "total": 6, "at": "2026-08-19T15:09:49.510686+00:00"}
+{"kind": "log", "phase": "sources", "message": "mail: connecting", "current": 2, "total": 6, "at": "2026-08-19T15:09:49.511323+00:00"}
+{"kind": "advance", "phase": "sources", "message": "mail: failed", "current": 3, "total": 6, "at": "2026-08-19T15:09:53.401864+00:00"}
+{"kind": "log", "phase": "sources", "message": "teams: connecting", "current": 3, "total": 6, "at": "2026-08-19T15:09:53.402533+00:00"}
+{"kind": "advance", "phase": "sources", "message": "teams: 5 items", "current": 4, "total": 6, "at": "2026-08-19T15:10:43.060645+00:00"}
+{"kind": "log", "phase": "sources", "message": "calendar: connecting", "current": 4, "total": 6, "at": "2026-08-19T15:10:43.061358+00:00"}
+{"kind": "advance", "phase": "sources", "message": "calendar: 0 items", "current": 5, "total": 6, "at": "2026-08-19T15:10:51.699343+00:00"}
+{"kind": "log", "phase": "sources", "message": "planner: connecting", "current": 5, "total": 6, "at": "2026-08-19T15:10:51.699920+00:00"}
+{"kind": "advance", "phase": "sources", "message": "planner: failed", "current": 6, "total": 6, "at": "2026-08-19T15:10:57.311760+00:00"}
+{"kind": "phase", "phase": "ingest", "message": "", "current": 0, "total": 10, "at": "2026-08-19T15:10:57.312252+00:00"}
+{"kind": "advance", "phase": "ingest", "message": "", "current": 1, "total": 10, "at": "2026-08-19T15:10:57.314777+00:00"}
+{"kind": "advance", "phase": "ingest", "message": "", "current": 2, "total": 10, "at": "2026-08-19T15:10:57.316061+00:00"}
+{"kind": "advance", "phase": "ingest", "message": "", "current": 3, "total": 10, "at": "2026-08-19T15:10:57.317854+00:00"}
+{"kind": "advance", "phase": "ingest", "message": "", "current": 4, "total": 10, "at": "2026-08-19T15:10:57.319865+00:00"}
+{"kind": "advance", "phase": "ingest", "message": "", "current": 5, "total": 10, "at": "2026-08-19T15:10:57.321702+00:00"}
+{"kind": "advance", "phase": "ingest", "message": "", "current": 6, "total": 10, "at": "2026-08-19T15:10:57.323113+00:00"}
+{"kind": "advance", "phase": "ingest", "message": "", "current": 7, "total": 10, "at": "2026-08-19T15:10:57.324686+00:00"}
+{"kind": "advance", "phase": "ingest", "message": "", "current": 8, "total": 10, "at": "2026-08-19T15:10:57.326024+00:00"}
+{"kind": "advance", "phase": "ingest", "message": "", "current": 9, "total": 10, "at": "2026-08-19T15:10:57.327406+00:00"}
+{"kind": "advance", "phase": "ingest", "message": "", "current": 10, "total": 10, "at": "2026-08-19T15:10:57.328711+00:00"}
+{"kind": "phase", "phase": "embed", "message": "", "current": 0, "total": 0, "at": "2026-08-19T15:10:57.329635+00:00"}
+{"kind": "phase", "phase": "dedupe", "message": "", "current": 0, "total": 0, "at": "2026-08-19T15:10:57.348974+00:00"}
+{"kind": "phase", "phase": "crm", "message": "", "current": 0, "total": 0, "at": "2026-08-19T15:10:57.433507+00:00"}
+{"kind": "phase", "phase": "rank", "message": "", "current": 0, "total": 0, "at": "2026-08-19T15:10:57.439755+00:00"}
+{"kind": "phase", "phase": "propose", "message": "", "current": 0, "total": 0, "at": "2026-08-19T15:10:57.440456+00:00"}
+{"kind": "phase", "phase": "done", "message": "10 items from 6 sources", "current": 0, "total": 0, "at": "2026-08-19T15:10:57.441129+00:00"}

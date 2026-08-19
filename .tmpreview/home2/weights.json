@@ -1,0 +1,23 @@
+{
+  "auto_link_threshold": 0.9,
+  "corrections_applied": 0,
+  "dedupe": {
+    "cross_reference": 2.0,
+    "embedding_similarity": 0.45,
+    "same_owner": 0.15,
+    "same_source_penalty": -0.35,
+    "shared_external_ref": 0.7,
+    "temporal_proximity": 0.1,
+    "title_similarity": 0.5
+  },
+  "learning_rate": 0.08,
+  "priority": {
+    "blocking": 0.8,
+    "explicit_ask": 0.5,
+    "owner_is_me": 0.4,
+    "source_importance": 0.6,
+    "staleness": 0.3,
+    "urgency": 1.0
+  },
+  "propose_threshold": 0.45
+}

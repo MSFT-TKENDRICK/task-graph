@@ -519,10 +519,18 @@ def shell(ctx: click.Context, commands: tuple[str, ...]) -> None:
         status_code = run_shell(
             main,
             base_args=base_args,
-            banner=banner_for(__version__, settings.home, len(runner.running())),
+            banner=banner_for(__version__, settings.home, _running_jobs(runner)),
             runner=runner,
         )
     ctx.exit(status_code)
+
+
+def _running_jobs(runner: JobRunner) -> int:
+    """Count running jobs for the banner, never failing the shell over it."""
+    try:
+        return len(runner.running())
+    except OSError:
+        return 0
 
 
 def _inherited_args(ctx: click.Context) -> list[str]:

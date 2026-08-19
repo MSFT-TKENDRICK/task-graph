@@ -70,6 +70,10 @@ _KILL_GRACE_SECONDS = 3.0
 #: How long a job may sit with no pid before it counts as a failed spawn.
 _SPAWN_GRACE_SECONDS = 30.0
 
+#: Windows process-query access right, and a lazily configured kernel32.
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_KERNEL32: Any = None
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -209,13 +213,40 @@ def process_start_token(pid: int | None) -> str | None:
     return _proc_start_token(pid)
 
 
+def _kernel32() -> Any:
+    """kernel32 with the signatures we depend on declared explicitly.
+
+    The default ``c_int`` return type happens to work for handles, because
+    Windows keeps kernel handle values inside 32 bits -- but nothing here says
+    so, and declaring the signatures costs a few lines and removes the
+    dependence on an unstated invariant.
+    """
+    global _KERNEL32
+    if _KERNEL32 is not None:
+        return _KERNEL32
+
+    import ctypes
+    from ctypes import wintypes
+
+    lib = ctypes.WinDLL("kernel32", use_last_error=True)
+    lib.OpenProcess.restype = wintypes.HANDLE
+    lib.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    lib.CloseHandle.restype = wintypes.BOOL
+    lib.CloseHandle.argtypes = [wintypes.HANDLE]
+    lib.GetExitCodeProcess.restype = wintypes.BOOL
+    lib.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    lib.GetProcessTimes.restype = wintypes.BOOL
+    lib.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    _KERNEL32 = lib
+    return lib
+
+
 def _windows_start_token(pid: int) -> str | None:
     import ctypes
     from ctypes import wintypes
 
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    kernel32 = _kernel32()
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
         return None
     try:
@@ -281,11 +312,10 @@ def _pid_exists(pid: int) -> bool:
     import ctypes
     from ctypes import wintypes
 
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     STILL_ACTIVE = 259
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    kernel32 = _kernel32()
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
         return False
     try:
@@ -402,6 +432,19 @@ class JobRunner:
         )
         return self._reap(job)
 
+    def _forget(self, job_id: str) -> None:
+        """Let go of a finished child, reaping it on the way out.
+
+        Holding the handle is what makes ``_alive`` reliable while a job runs,
+        and what makes it a leak once the job is over: a strong reference stops
+        ``Popen.__del__`` ever running, so the interpreter's own late cleanup
+        never happens either and a POSIX child stays a zombie for the life of
+        the shell. ``poll()`` is non-blocking and is the call that reaps it.
+        """
+        owned = self._processes.pop(job_id, None)
+        if owned is not None:
+            owned.poll()
+
     def _alive(self, job: Job) -> bool:
         """Is this job's process still running?
 
@@ -422,6 +465,10 @@ class JobRunner:
         Left alone it would sit in the list claiming to run forever.
         """
         if job.state in TERMINAL_STATES:
+            # The child writes its result *before* it exits, so this is the
+            # path every completed job takes from then on -- and therefore the
+            # only place its handle can be released.
+            self._forget(job.id)
             return job
         if job.pid is None:
             # Never got as far as a process. Give the spawn a moment to land
@@ -438,6 +485,7 @@ class JobRunner:
         if not cancelled and not job.error:
             job.error = "the job process exited without recording a result"
         write_meta(job)
+        self._forget(job.id)
         return job
 
     # ------------------------------------------------------------ operations
@@ -527,7 +575,7 @@ class JobRunner:
         # whole tree.
         if job.pid and self._alive(job):
             kill_tree(job.pid, owned=self._processes.get(job.id))
-        self._processes.pop(job.id, None)
+        self._forget(job.id)
         job.state = STATE_CANCELLED
         job.ended_at = _now()
         write_meta(job)

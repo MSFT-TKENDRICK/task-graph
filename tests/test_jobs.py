@@ -345,6 +345,16 @@ def test_meta_survives_a_transient_reader(runner):
     assert runner.get(job.id).error == "written while being read"
 
 
+def test_a_finished_job_releases_its_process_handle(runner):
+    """Holding the handle past completion is a zombie leak, not caution."""
+    job = runner.submit(["status"])
+    owned = runner._processes[job.id]
+    _wait(runner, job.id)
+
+    assert job.id not in runner._processes, "handle retained after completion"
+    assert owned.returncode is not None, "child was never reaped"
+
+
 def test_cancel_kills_the_process_it_points_at(runner):
     """Cancellation has to stop a real process, not just relabel a record.
 
