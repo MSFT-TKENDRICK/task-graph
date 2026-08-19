@@ -195,7 +195,7 @@ def test_doctor_runs_healthy_and_json_parseable(runner, isolated_env, monkeypatc
     monkeypatch.setattr(
         TaskGraphApp,
         "preflight",
-        lambda self: [
+        lambda self, reporter=None: [
             {
                 "check": "connector:github",
                 "ok": False,

@@ -163,6 +163,44 @@ there also works as `tg <command>` or `.\run.ps1 <command>`, and
 Corrections only change behaviour after `learn`, which reports exactly which
 weights moved.
 
+## Background jobs
+
+`sync`, `doctor`, `rebuild` and `learn` run as background jobs, because all of
+them block on `agency mcp` servers. In the shell they start and follow:
+
+```
+tg> sync
+[job 3] sync - Ctrl-C cancels; add & to keep the prompt
+| sources 2/6 mail: 12 items (7s)
+```
+
+| you type | what happens |
+| --- | --- |
+| `sync` | starts job, follows it live, Ctrl-C cancels it |
+| `sync &` | starts it and hands the prompt straight back |
+| `jobs` | what is running, and how far in |
+| `jobs --all` | finished ones too |
+| `logs 3` / `logs 3 -f` | that job's captured output |
+| `cancel 3` | stop it, and everything it started |
+
+Outside the shell the same jobs are reachable: `tg bg sync --propose` starts
+one, `tg jobs` lists them, `tg logs 3` reads one. Job state lives in
+`~/.task-graph/jobs/`, so a job outlives the shell that started it and the MCP
+server sees the same list.
+
+Cancelling kills the process tree, not just the job process. That matters:
+the cost of a sync is the `agency mcp` servers it spawned, and stopping only
+the parent would leave them running with their sessions open.
+
+`triage` and every other read stays instant while a job runs — both databases
+are in WAL mode, so a writer never blocks a reader.
+
+Run one inline instead, with a progress line and Ctrl-C to abort:
+
+```powershell
+tg sync            # foreground; the shell is where jobs happen
+```
+
 ## Running from the GitHub Copilot app
 
 `.github/github-app.yml` wires two scripts:

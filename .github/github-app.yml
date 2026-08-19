@@ -18,6 +18,10 @@ instructions: |
   - All state lives in `~/.task-graph` (`TASK_GRAPH_HOME`), never in the repo,
     and no credentials are stored anywhere. `events.db` is the source of truth;
     `graph.db` is a disposable projection rebuilt by `tg rebuild`.
+  - Slow commands (sync, doctor, rebuild, learn) run as background jobs in child
+    processes, tracked under `~/.task-graph/jobs/`. Cancellation kills the
+    process tree because a thread blocked in an MCP call cannot be interrupted.
+    Keep fast local reads in-process; they finish in milliseconds.
   - Ingest is strictly read-only, and enforced: connectors refuse any tool whose
     name tokenises as a mutation. Remediation is proposed, never applied without
     an explicit approval, and `approve` and `execute` stay separate steps.

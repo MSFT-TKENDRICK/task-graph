@@ -155,6 +155,56 @@ moved. Learning is idempotent — corrections are marked applied.
 different weights and reports which would change, answering "would learning from
 this have helped?" against real history rather than intuition.
 
+## Jobs
+
+Everything slow is a source waiting on a source. A `sync` spawns one
+`agency mcp` server per connector and blocks on each; a `doctor` probes all of
+them. Run inline, that freezes the prompt for tens of seconds with nothing on
+screen, which is indistinguishable from a hang.
+
+So `sync`, `doctor`, `rebuild` and `learn` run as **child processes**, tracked
+in `$TASK_GRAPH_HOME/jobs/<id>/`. Two things forced processes rather than
+threads, and the second one settles it:
+
+- activegraph's `SQLiteEventStore` opens its connection without
+  `check_same_thread=False`, so a worker thread cannot append events at all.
+- A thread blocked inside an MCP call cannot be interrupted. Cooperative
+  cancellation only works if the work checks a flag, and this work spends its
+  time inside somebody else's blocking read. Killing the process tree is the
+  only cancellation that actually stops an in-flight call — and it reaps the
+  `agency` grandchildren, which a thread-based design would leave running.
+
+Both databases are in WAL mode, so a job writing does not block the prompt
+reading: `triage` stays instant while a sync runs.
+
+The child records its own terminal state, so nothing depends on the parent
+surviving to observe the outcome — a job outlives the shell that started it, and
+the one-shot CLI and MCP server see the same jobs. A process that dies without
+recording anything is reaped as `lost` on the next read, rather than sitting in
+the list claiming to run forever.
+
+Progress crosses the process boundary as NDJSON, one event per line, flushed
+immediately; the follower tails it and skips any partial trailing line, which is
+the normal state of a file being appended to by someone else.
+
+Fast commands deliberately stay in-process. A local SQLite read finishes in
+single-digit milliseconds, and spawning a process to do it would cost more than
+the work.
+
+### Probing concurrently
+
+`preflight` and `enabled_sources` probe every connector at once. The probes are
+independent subprocess spawns that spend their time waiting, so running them
+serially just adds up the waits — six sources took 33 seconds of which almost
+none was work. Results are collected into a dict and read back in registration
+order, so finishing out of order does not make the output jump around.
+
+The related trap was `available_connectors()`, which *probes* everything and
+returns statuses. Two callers used it merely to enumerate kinds and threw the
+statuses away, paying a full probe sweep for a list of dictionary keys — the
+silent half-minute at the front of both `sync` and `doctor`.
+`registered_connectors()` is the cheap listing they wanted.
+
 ## Storage
 
 `SqliteGraphStore` implements activegraph's `GraphStore` ABC. Structural query

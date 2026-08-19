@@ -133,9 +133,36 @@ trade-offs, including why vector search is brute-force numpy rather than
 | `tg learn` | fold corrections into the weights |
 | `tg weights` | inspect or set tuning parameters |
 | `tg shell` | interactive prompt; one process, no restart cost |
+| `tg bg CMD` / `tg jobs` / `tg logs ID` / `tg cancel ID` | background work |
 | `tg status` / `tg doctor` / `tg rebuild` / `tg init` | operations |
 
 Every command supports `--json`.
+
+## Nothing blocks
+
+Slow work is a job. `sync`, `doctor`, `rebuild` and `learn` all spend their time
+waiting on `agency mcp` servers, so they run as child processes you can watch,
+leave, and kill:
+
+```
+tg> sync
+[job 3] sync - Ctrl-C cancels; add & to keep the prompt
+| sources 2/6 mail: 12 items (7s)
+```
+
+- **Progress**, per source, because that is where the seconds go.
+- **Ctrl-C cancels** — and kills the `agency` subprocesses too, which is the
+  only thing that actually stops an in-flight call.
+- **`sync &`** hands the prompt straight back. `triage` stays instant while it
+  runs; both databases are WAL, so a job writing never blocks a read.
+- **`jobs`, `logs <id>`, `cancel <id>`** work from the shell, the one-shot CLI
+  and the MCP server, because job state is on disk rather than in memory. A job
+  outlives the shell that started it.
+
+Fast commands stay in-process and instant — spawning a process to run a SQLite
+read would cost more than the read.
+
+Connector probes now run concurrently, which took `doctor` from 37s to 12s.
 
 ## Running it from the GitHub Copilot app
 

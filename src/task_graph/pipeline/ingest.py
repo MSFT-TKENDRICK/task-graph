@@ -29,6 +29,7 @@ from task_graph.ontology.types import (
     SourceKind,
     TaskState,
 )
+from task_graph.progress import Reporter, null_reporter
 from task_graph.store.search import SearchIndex
 from task_graph.store.sqlite_graph_store import SqliteGraphStore, searchable_text
 from task_graph.store.vectors import text_fingerprint
@@ -196,15 +197,26 @@ class Ingestor:
 
     # ------------------------------------------------------------------ main
 
-    def ingest(self, items: Iterable[SourceItem], actor: str = "ingest") -> IngestReport:
+    def ingest(
+        self,
+        items: Iterable[SourceItem],
+        actor: str = "ingest",
+        *,
+        reporter: Reporter | None = None,
+    ) -> IngestReport:
         report = IngestReport()
+        progress = reporter or null_reporter()
+        items = list(items)
+        progress.phase("ingest", total=len(items))
         with self.store.bulk_writes():
             for item in items:
                 try:
                     self._ingest_one(item, actor, report)
                 except Exception as exc:  # one bad record must not abort a sync
                     report.errors.append(f"{getattr(item, 'source_uri', '?')}: {exc}")
+                progress.advance()
         if self.embedder is not None:
+            progress.phase("embed")
             report.embedded = self.embed_stale()
         return report
 

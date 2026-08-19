@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import sqlite3
+import time
 from collections.abc import Callable
 from datetime import datetime
 from enum import Enum
@@ -23,9 +24,17 @@ from task_graph.config import (
     Settings,
     set_settings,
 )
+from task_graph.jobs import JobRunner
 from task_graph.learning.corrections import LearningReport
 from task_graph.ontology.types import ObjectType
 from task_graph.pipeline.approval import ApprovalRequiredError, RemediationExecutionError
+from task_graph.progress import (
+    ENV_PROGRESS_FILE,
+    ConsoleSink,
+    Reporter,
+    file_reporter,
+    null_reporter,
+)
 from task_graph.shell import banner_for, run_shell
 from task_graph.store import SCHEMA_VERSION
 
@@ -67,8 +76,8 @@ def _settings_from_context(ctx: click.Context) -> Settings:
     return settings
 
 
-def _with_app(ctx: click.Context) -> TaskGraphApp:
-    return TaskGraphApp(_settings_from_context(ctx))
+def _with_app(ctx: click.Context, reporter: Reporter | None = None) -> TaskGraphApp:
+    return TaskGraphApp(_settings_from_context(ctx), reporter=reporter)
 
 
 def _truncate(text: Any, width: int) -> str:
@@ -135,6 +144,35 @@ def main(ctx: click.Context, home: Path | None, as_json: bool, verbose: int) -> 
     ctx.obj.update({"home": home, "json": as_json, "verbose": verbose})
 
 
+def _reporter(ctx: click.Context) -> tuple[Reporter, ConsoleSink | None]:
+    """Build the progress reporter for a slow command.
+
+    Three destinations, in priority order: the file a job runner asked for, a
+    live line on the terminal, or nowhere. JSON mode never draws, because the
+    point of `--json` is that stdout parses.
+
+    The opening event is emitted here rather than left to the caller so that
+    something appears immediately. Opening the graph and probing the embedder
+    happen before any command-specific work, and a silent gap at the start is
+    indistinguishable from a hang -- which is the whole complaint.
+    """
+    env_path = (os.environ.get(ENV_PROGRESS_FILE) or "").strip()
+    if env_path:
+        reporter, console = file_reporter(env_path), None
+    elif ctx.obj.get("json"):
+        return null_reporter(), None
+    else:
+        console = ConsoleSink()
+        reporter = Reporter(console)
+    reporter.phase("starting", message="opening the graph")
+    return reporter, console
+
+
+def _finish(console: ConsoleSink | None) -> None:
+    if console is not None:
+        console.clear()
+
+
 @main.command()
 @click.option("--source", "sources", multiple=True, type=click.Choice(["github", "ado", "mail"]))
 @click.option("--since", help="Only sync changes since this ISO timestamp.")
@@ -152,14 +190,19 @@ def sync(
 ) -> None:
     """Pull source changes into the local graph."""
     since_dt = datetime.fromisoformat(since.replace("Z", "+00:00")) if since else None
-    with _with_app(ctx) as app:
-        report = app.sync(
-            sources=sources or None,
-            since=since_dt,
-            dedupe=not no_dedupe,
-            rank=not no_rank,
-            propose=propose,
-        )
+    reporter, console = _reporter(ctx)
+    try:
+        with _with_app(ctx, reporter) as app:
+            report = app.sync(
+                sources=sources or None,
+                since=since_dt,
+                dedupe=not no_dedupe,
+                rank=not no_rank,
+                propose=propose,
+                reporter=reporter,
+            )
+    finally:
+        _finish(console)
     data = _sync_report(report)
     _render(ctx, data, report.summary())
 
@@ -389,8 +432,13 @@ def correct(
 @click.pass_context
 def learn(ctx: click.Context) -> None:
     """Fold pending corrections into learned weights."""
-    with _with_app(ctx) as app:
-        report = app.learn()
+    reporter, console = _reporter(ctx)
+    try:
+        with _with_app(ctx, reporter) as app:
+            reporter.phase("learn")
+            report = app.learn()
+    finally:
+        _finish(console)
     _render(ctx, _learning_report(report), report.summary())
 
 
@@ -421,9 +469,13 @@ def status(ctx: click.Context) -> None:
 @click.pass_context
 def doctor(ctx: click.Context) -> None:
     """Run environment and storage diagnostics."""
-    with _with_app(ctx) as app:
-        checks = list(app.preflight())
-        checks.extend(_storage_checks(app))
+    reporter, console = _reporter(ctx)
+    try:
+        with _with_app(ctx, reporter) as app:
+            checks = list(app.preflight(reporter))
+            checks.extend(_storage_checks(app))
+    finally:
+        _finish(console)
     critical_failed = any((not c["ok"]) and c.get("critical") for c in checks)
     _render(ctx, {"checks": checks}, lambda: _format_checks(checks))
     if critical_failed:
@@ -434,8 +486,12 @@ def doctor(ctx: click.Context) -> None:
 @click.pass_context
 def rebuild(ctx: click.Context) -> None:
     """Rebuild the disposable graph projection from the event log."""
-    with _with_app(ctx) as app:
-        data = app.rebuild()
+    reporter, console = _reporter(ctx)
+    try:
+        with _with_app(ctx, reporter) as app:
+            data = app.rebuild(reporter)
+    finally:
+        _finish(console)
     _render(ctx, data, lambda: "\n".join(f"{k}: {v}" for k, v in data.items()))
 
 
@@ -456,13 +512,15 @@ def shell(ctx: click.Context, commands: tuple[str, ...]) -> None:
     """
     settings = _settings_from_context(ctx)
     base_args = _inherited_args(ctx)
+    runner = JobRunner(settings.home)
     if commands:
-        status_code = run_shell(main, base_args=base_args, lines=list(commands))
+        status_code = run_shell(main, base_args=base_args, lines=list(commands), runner=runner)
     else:
         status_code = run_shell(
             main,
             base_args=base_args,
-            banner=banner_for(__version__, settings.home),
+            banner=banner_for(__version__, settings.home, len(runner.running())),
+            runner=runner,
         )
     ctx.exit(status_code)
 
@@ -482,6 +540,105 @@ def _inherited_args(ctx: click.Context) -> list[str]:
         args.append("--json")
     args += ["-v"] * int(obj.get("verbose") or 0)
     return args
+
+
+@main.command(
+    "bg",
+    # Everything after `bg` belongs to the job, not to bg. Without this Click
+    # tries to resolve `--propose` as an option of bg itself and refuses, which
+    # breaks every command worth backgrounding.
+    context_settings={"ignore_unknown_options": True, "allow_interspersed_args": False},
+)
+@click.argument("command", nargs=-1, required=True, type=click.UNPROCESSED)
+@click.pass_context
+def bg(ctx: click.Context, command: tuple[str, ...]) -> None:
+    """Start a tg command as a background job and return immediately.
+
+    Everything after `bg` is passed through untouched, so
+    `tg bg sync --propose` runs exactly the sync you would have typed.
+    """
+    runner = _job_runner(ctx)
+    job = runner.submit([*_inherited_args(ctx), *command])
+    data = job.to_dict()
+    _render(ctx, data, f"Started job {job.id}: {job.label}")
+
+
+@main.command("jobs")
+@click.option("--all", "show_all", is_flag=True, help="Include finished jobs.")
+@click.option("--limit", default=15, show_default=True, type=int)
+@click.pass_context
+def jobs_cmd(ctx: click.Context, show_all: bool, limit: int) -> None:
+    """List background jobs and what they are doing."""
+    runner = _job_runner(ctx)
+    found = runner.list(limit=limit, running_only=not show_all)
+    rows = [job.to_dict() for job in found]
+    _render(ctx, rows, lambda: _format_jobs(rows, show_all=show_all))
+
+
+@main.command("logs")
+@click.argument("job_id")
+@click.option("--follow", "-f", is_flag=True, help="Keep printing until the job ends.")
+@click.option("--tail", "-n", type=int, default=None, help="Only the last N lines.")
+@click.pass_context
+def logs_cmd(ctx: click.Context, job_id: str, follow: bool, tail: int | None) -> None:
+    """Show a job's captured output."""
+    runner = _job_runner(ctx)
+    try:
+        job = runner.get(job_id)
+    except KeyError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if not follow:
+        text = job.read_log(tail=tail)
+        _render(ctx, {"id": job.id, "log": text}, text or "(no output yet)")
+        return
+
+    offset = 0
+    click.echo(f"--- job {job.id}: {job.label} (Ctrl-C to stop watching) ---")
+    try:
+        while True:
+            job = runner.get(job_id)
+            text = job.read_log()
+            if len(text) > offset:
+                click.echo(text[offset:], nl=False)
+                offset = len(text)
+            if not job.is_running:
+                break
+            time.sleep(0.3)
+    except KeyboardInterrupt:
+        click.echo("\n(stopped watching; the job is still running)")
+        return
+    click.echo(f"--- job {job.id} {job.state} ---")
+
+
+@main.command("cancel")
+@click.argument("job_id")
+@click.pass_context
+def cancel_cmd(ctx: click.Context, job_id: str) -> None:
+    """Stop a running job and everything it started."""
+    runner = _job_runner(ctx)
+    try:
+        job = runner.cancel(job_id)
+    except KeyError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _render(ctx, job.to_dict(), f"Job {job.id} {job.state}.")
+
+
+def _job_runner(ctx: click.Context) -> JobRunner:
+    return JobRunner(_settings_from_context(ctx).home)
+
+
+def _format_jobs(rows: list[dict[str, Any]], *, show_all: bool) -> str:
+    if not rows:
+        return "No jobs running." if not show_all else "No jobs yet."
+    lines = [f"{'ID':>4}  {'STATE':<10}  {'TIME':>7}  {'COMMAND':<24}  PROGRESS"]
+    for row in rows:
+        lines.append(
+            f"{row['id']:>4}  {_truncate(row['state'], 10):<10}  "
+            f"{row['seconds']:>6.1f}s  {_truncate(row['command'], 24):<24}  "
+            f"{_truncate(row['progress'] or row['error'], 40)}"
+        )
+    return "\n".join(lines)
 
 
 @main.command("init")

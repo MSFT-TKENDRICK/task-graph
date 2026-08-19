@@ -17,6 +17,7 @@ from task_graph.connectors.base import (
     github_pr_uri,
     mail_uri,
     register_connector,
+    registered_connectors,
 )
 from task_graph.connectors.calendar import (
     CalendarConnector,
@@ -86,5 +87,6 @@ __all__ = [
     "msx_opportunity_uri",
     "planner_uri",
     "register_connector",
+    "registered_connectors",
     "teams_uri",
 ]

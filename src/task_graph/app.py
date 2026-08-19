@@ -15,6 +15,7 @@ from __future__ import annotations
 import shutil
 import uuid
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -24,8 +25,8 @@ from activegraph import Graph, Object, SQLiteEventStore
 from task_graph.config import Settings, get_settings
 from task_graph.connectors.base import (
     SourceItem,
-    available_connectors,
     get_connector,
+    registered_connectors,
 )
 from task_graph.embeddings import describe_embedder, get_embedder
 from task_graph.learning.corrections import Corrector, LearningReport
@@ -37,6 +38,7 @@ from task_graph.pipeline.crm import CrmProjector, CrmReport
 from task_graph.pipeline.dedupe import Deduper, DedupeReport
 from task_graph.pipeline.ingest import Ingestor, IngestReport
 from task_graph.pipeline.remediation import propose_remediations
+from task_graph.progress import Reporter, null_reporter
 from task_graph.store import SearchIndex, SqliteGraphStore
 
 _RUN_ID_KEY = "run_id"
@@ -66,20 +68,32 @@ class SyncReport:
 class TaskGraphApp:
     """Everything wired together, opened against one state directory."""
 
-    def __init__(self, settings: Settings | None = None, *, embedder: Any = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        embedder: Any = None,
+        reporter: Reporter | None = None,
+    ) -> None:
+        report = reporter or null_reporter()
         self.settings = settings or get_settings()
         self.settings.ensure_home()
 
+        report.log("opening the projection")
         self.store = SqliteGraphStore(self.settings.graph_db)
         run_id = self._resolve_run_id()
 
+        report.log("reading the event log")
         self.graph = Graph(graph_store=self.store, run_id=run_id)
         self.events = SQLiteEventStore(str(self.settings.events_db), run_id=run_id)
         self.graph.ids.reseed_from_events(self.events.iter_events())
         self.graph.attach_store(self.events)
 
+        report.log("loading learned weights")
         self.weights = Weights.load(self.settings.weights_path)
+        report.log("preparing the embedder")
         self.embedder = embedder if embedder is not None else get_embedder(self.settings)
+        report.log("opening the search index")
         self.search = SearchIndex(self.store.connection)
 
         self.ingestor = Ingestor(self.graph, self.store, self.embedder, self.search)
@@ -128,44 +142,65 @@ class TaskGraphApp:
         dedupe: bool = True,
         rank: bool = True,
         propose: bool = False,
+        reporter: Reporter | None = None,
     ) -> SyncReport:
         """Pull from sources, unify, rank and optionally propose actions.
 
         ``propose`` is off by default: proposals are only useful once the user
         has reviewed the graph, and generating them on every scheduled sync
         would fill the approval queue with noise.
+
+        Progress is reported per source because that is where the time goes:
+        each connector spawns an `agency mcp` server and waits on it, so
+        "which source are we on" is the only number that moves for whole
+        seconds at a time.
         """
-        kinds = [SourceKind(s) for s in (sources or self.enabled_sources())]
+        report = reporter or null_reporter()
+        kinds = [SourceKind(s) for s in sources] if sources else self.enabled_sources(report)
         items: list[SourceItem] = []
         errors: list[str] = []
 
+        report.phase("sources", total=len(kinds))
         for kind in kinds:
+            report.log(f"{kind.value}: connecting")
             try:
                 connector = get_connector(kind)
                 status = connector.is_available()
                 if not status.available:
                     errors.append(f"{kind.value}: {status.detail}")
+                    report.advance(message=f"{kind.value}: unavailable")
                     continue
-                items.extend(connector.fetch(since=since))
+                fetched = list(connector.fetch(since=since))
+                items.extend(fetched)
+                report.advance(message=f"{kind.value}: {len(fetched)} items")
             except Exception as exc:
                 errors.append(f"{kind.value}: {exc}")
+                report.advance(message=f"{kind.value}: failed")
 
-        ingest_report = self.ingestor.ingest(items)
+        ingest_report = self.ingestor.ingest(items, reporter=report)
         ingest_report.errors.extend(errors)
 
+        report.phase("dedupe")
         dedupe_report = self.deduper.run() if dedupe else DedupeReport()
+
+        report.phase("crm")
         try:
             crm_report = self.crm()
         except Exception as exc:  # CRM context must not make source sync fail
             errors.append(f"crm: {exc}")
             crm_report = CrmReport(errors=[str(exc)])
+
+        report.phase("rank")
         ranked = self.rank() if rank else []
 
         proposed = 0
         if propose:
+            report.phase("propose", total=len(ranked))
             for task, _ in ranked:
                 proposed += len(propose_remediations(self.graph, task))
+                report.advance()
 
+        report.phase("done", message=f"{len(items)} items from {len(kinds)} sources")
         return SyncReport(
             ingest=ingest_report,
             dedupe=dedupe_report,
@@ -175,16 +210,57 @@ class TaskGraphApp:
             errors=errors,
         )
 
-    def enabled_sources(self) -> list[SourceKind]:
-        """Connectors that are registered and currently usable."""
-        usable = []
-        for kind in available_connectors():
-            try:
-                if get_connector(kind).is_available().available:
-                    usable.append(kind)
-            except Exception:
-                continue
-        return usable
+    def _probe(self, kind: SourceKind) -> dict[str, Any]:
+        """Probe one connector, never raising."""
+        try:
+            status = get_connector(kind).is_available()
+        except Exception as exc:
+            return {
+                "check": f"connector:{kind.value}",
+                "ok": False,
+                "detail": str(exc),
+                "remediation": None,
+            }
+        return {
+            "check": f"connector:{kind.value}",
+            "ok": status.available,
+            "detail": status.detail,
+            "remediation": status.remediation,
+        }
+
+    def _probe_all(
+        self, kinds: list[SourceKind], report: Reporter
+    ) -> dict[SourceKind, dict[str, Any]]:
+        """Probe every connector at once, reporting each as it lands.
+
+        Probes are independent subprocess spawns that spend their time waiting,
+        so running them one after another simply adds up the waits -- six
+        sources took over thirty seconds of which almost none was work. Results
+        are collected into a dict and read back in registration order, so
+        finishing out of order does not make the output jump around.
+        """
+        results: dict[SourceKind, dict[str, Any]] = {}
+        if not kinds:
+            return results
+        with ThreadPoolExecutor(max_workers=min(8, len(kinds))) as pool:
+            futures = {pool.submit(self._probe, kind): kind for kind in kinds}
+            for future in as_completed(futures):
+                kind = futures[future]
+                results[kind] = future.result()
+                report.advance(message=f"{kind.value} checked")
+        return results
+
+    def enabled_sources(self, reporter: Reporter | None = None) -> list[SourceKind]:
+        """Connectors that are registered and currently usable.
+
+        Each probe spawns a server and waits on it, so this reports per source:
+        it is the first thing a bare `sync` does and used to be a silent wait.
+        """
+        report = reporter or null_reporter()
+        kinds = registered_connectors()
+        report.phase("probing", total=len(kinds))
+        results = self._probe_all(kinds, report)
+        return [kind for kind in kinds if results.get(kind, {}).get("ok")]
 
     # -------------------------------------------------------------- querying
 
@@ -321,7 +397,7 @@ class TaskGraphApp:
 
     # -------------------------------------------------------------- rebuild
 
-    def rebuild(self) -> dict[str, int]:
+    def rebuild(self, reporter: Reporter | None = None) -> dict[str, int]:
         """Reconstruct the projection from the event log.
 
         The projection is disposable by design; this is what makes that claim
@@ -332,7 +408,9 @@ class TaskGraphApp:
         text — so they are regenerated afterwards. Skipping that would leave
         semantic search silently degraded until the next sync.
         """
+        report = reporter or null_reporter()
         run_id = self.graph.run_id
+        report.phase("read")
         events = list(self.events.iter_events())
 
         self.store.close()
@@ -347,9 +425,11 @@ class TaskGraphApp:
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (_RUN_ID_KEY, run_id)
         )
         fresh_graph = Graph(graph_store=fresh_store, run_id=run_id)
+        report.phase("replay", total=len(events))
         with fresh_store.bulk_writes():
             for event in events:
                 fresh_graph.emit(event)
+                report.advance()
         # Replay re-emits existing ids; without reseeding, the next add_object
         # would restart the counters and collide with what was just replayed.
         fresh_graph.ids.reseed_from_events(events)
@@ -365,11 +445,13 @@ class TaskGraphApp:
         self.corrector = Corrector(self.graph, self.store, self.weights)
         self.approvals = ApprovalQueue(self.graph)
 
+        report.phase("embed")
         re_embedded = self.ingestor.embed_stale() if self.embedder is not None else 0
 
         counts = self.store.counts()
         counts["events_replayed"] = len(events)
         counts["re_embedded"] = re_embedded
+        report.phase("done", message=f"{len(events)} events replayed")
         return counts
 
     # ---------------------------------------------------------------- status
@@ -396,26 +478,21 @@ class TaskGraphApp:
             "checked_at": datetime.now(UTC).isoformat(),
         }
 
-    def preflight(self) -> list[dict[str, Any]]:
-        """Per-dependency health, backing ``tg doctor``."""
-        checks: list[dict[str, Any]] = []
+    def preflight(self, reporter: Reporter | None = None) -> list[dict[str, Any]]:
+        """Per-dependency health, backing ``tg doctor``.
 
-        for kind in available_connectors():
-            try:
-                status = get_connector(kind).is_available()
-                checks.append(
-                    {
-                        "check": f"connector:{kind.value}",
-                        "ok": status.available,
-                        "detail": status.detail,
-                        "remediation": status.remediation,
-                    }
-                )
-            except Exception as exc:
-                checks.append(
-                    {"check": f"connector:{kind.value}", "ok": False, "detail": str(exc),
-                     "remediation": None}
-                )
+        Each connector probe spawns a server and waits up to its probe timeout,
+        so this reports per check: a doctor run that says nothing for half a
+        minute is the thing that made the CLI feel hung.
+        """
+        report = reporter or null_reporter()
+        checks: list[dict[str, Any]] = []
+        report.log("listing connectors")
+        kinds = registered_connectors()
+        report.phase("checks", total=len(kinds) + 2)
+
+        results = self._probe_all(kinds, report)
+        checks.extend(results[kind] for kind in kinds if kind in results)
 
         checks.append(
             {
@@ -425,6 +502,7 @@ class TaskGraphApp:
                 "remediation": None if shutil.which("agency") else "Install the Agency CLI",
             }
         )
+        report.advance(message="agency checked")
         checks.append(
             {
                 "check": "embeddings",
@@ -437,4 +515,5 @@ class TaskGraphApp:
                 ),
             }
         )
+        report.advance(message="embeddings checked")
         return checks

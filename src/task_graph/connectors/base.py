@@ -62,7 +62,20 @@ def get_connector(kind: SourceKind | str) -> Connector:
         raise ConnectorError(f"No connector registered for {source_kind.value}") from exc
 
 
+def registered_connectors() -> list[SourceKind]:
+    """The kinds that have a connector, without touching any of them.
+
+    Distinct from :func:`available_connectors`, which *probes* every source and
+    is therefore expensive: it spawns an `agency mcp` server per connector and
+    waits on each. Callers that only want to enumerate kinds were paying that
+    price and discarding the answer, which put a silent half-minute at the
+    front of both `sync` and `doctor`.
+    """
+    return list(registry)
+
+
 def available_connectors() -> dict[SourceKind, ConnectorStatus]:
+    """Probe every registered connector. Slow by nature -- see above."""
     statuses: dict[SourceKind, ConnectorStatus] = {}
     for kind, factory in registry.items():
         try:

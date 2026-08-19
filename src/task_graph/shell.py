@@ -23,9 +23,15 @@ from __future__ import annotations
 
 import shlex
 import sys
+import time
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from functools import partial
+from typing import Any
 
 import click
+
+from task_graph.jobs import Job, JobRunner, is_job_command
+from task_graph.progress import ConsoleSink, iter_events
 
 PROMPT = "tg> "
 
@@ -69,6 +75,105 @@ def normalise(argv: Sequence[str]) -> list[str]:
         # page you actually wanted.
         return [*args[1:], "--help"]
     return args
+
+
+def split_background(argv: Sequence[str]) -> tuple[list[str], bool]:
+    """Strip a trailing ``&`` and report whether it was there.
+
+    Accepts both ``sync &`` and ``sync&``, because which one you type depends
+    entirely on which shell you used last.
+    """
+    args = list(argv)
+    if not args:
+        return args, False
+    if args[-1] == "&":
+        return args[:-1], True
+    if len(args[-1]) > 1 and args[-1].endswith("&"):
+        args[-1] = args[-1][:-1]
+        return args, True
+    return args, False
+
+
+def follow(
+    runner: JobRunner,
+    job: Job,
+    *,
+    poll: float = 0.25,
+    out: Any = None,
+    err: Any = None,
+) -> int:
+    """Watch a running job: stream its output, draw its progress, allow Ctrl-C.
+
+    Output and progress go to different streams on purpose. The log is real
+    content and belongs on stdout, where it can be piped; the progress line is
+    a redrawn scribble that only makes sense on a terminal, so it goes to
+    stderr and is erased before anything is printed over it.
+    """
+    stdout = out if out is not None else sys.stdout
+    stderr = err if err is not None else sys.stderr
+    console = ConsoleSink(stderr)
+    log_at = 0
+    progress_at = 0
+
+    def drain() -> None:
+        nonlocal log_at, progress_at
+        current = runner.get(job.id)
+        text = current.read_log()
+        if len(text) > log_at:
+            console.clear()
+            stdout.write(text[log_at:])
+            stdout.flush()
+            log_at = len(text)
+        events, progress_at = iter_events(current.progress_path, start=progress_at)
+        for event in events:
+            console(event)
+
+    try:
+        while True:
+            drain()
+            if not runner.get(job.id).is_running:
+                break
+            time.sleep(poll)
+    except KeyboardInterrupt:
+        console.clear()
+        # A cancel is not instant -- it kills a process tree and waits for it --
+        # and an impatient second Ctrl-C lands right here. Absorb it, or the
+        # interrupt escapes into the shell loop and ends the session.
+        try:
+            runner.cancel(job.id)
+            click.echo(f"\nCancelled job {job.id}.", err=True)
+        except KeyboardInterrupt:
+            click.echo(f"\nStill stopping job {job.id}; check `jobs`.", err=True)
+        except Exception as exc:  # noqa: BLE001 - report, never propagate
+            click.echo(f"\ncould not cancel job {job.id}: {exc}", err=True)
+        return 130
+    finally:
+        console.clear()
+
+    drain()
+    finished = runner.get(job.id)
+    if finished.ok:
+        return 0
+    detail = finished.error or f"job {finished.id} {finished.state}"
+    click.echo(f"job {finished.id} {finished.state}: {detail}", err=True)
+    return finished.exit_code if finished.exit_code is not None else 1
+
+
+def start_job(
+    runner: JobRunner,
+    argv: Sequence[str],
+    *,
+    background: bool,
+    base_args: Sequence[str] = (),
+    echo: Callable[..., None] = click.echo,
+) -> int:
+    """Submit a job and either watch it or hand the prompt straight back."""
+    job = runner.submit([*base_args, *argv])
+    if background:
+        echo(f"Started job {job.id}: {job.label} (jobs, logs {job.id}, cancel {job.id})")
+        return 0
+    echo(f"[job {job.id}] {job.label} - Ctrl-C cancels; add & to keep the prompt")
+    return follow(runner, job)
 
 
 def invoke(group: click.Group, argv: Sequence[str], *, base_args: Sequence[str] = ()) -> int:
@@ -133,11 +238,17 @@ def run_shell(
     banner: str | None = None,
     prompt: str = PROMPT,
     echo: Callable[..., None] = click.echo,
+    runner: JobRunner | None = None,
 ) -> int:
     """Run the read-eval-print loop and return the last command's exit status.
 
     ``lines`` exists for tests and for ``tg shell -c``; when it is omitted the
     source is stdin, prompting only if there is a terminal on the other end.
+
+    Slow commands are handed to ``runner`` as background jobs rather than run
+    inline, so the prompt is never held hostage by a source that will not
+    answer. Fast commands stay in-process, because a local SQLite read finishes
+    in milliseconds and spawning a process to do it would be pure latency.
     """
     interactive = lines is None and sys.stdin is not None and sys.stdin.isatty()
     if lines is None:
@@ -161,19 +272,57 @@ def run_shell(
         argv = normalise(argv)
         if not argv:
             continue
+        argv, background = split_background(argv)
+        if not argv:
+            continue
+        if runner is not None and is_job_command(argv):
+            status = _guarded(
+                partial(
+                    start_job,
+                    runner,
+                    argv,
+                    background=background,
+                    base_args=base_args,
+                    echo=echo,
+                )
+            )
+            continue
         status = invoke(group, argv, base_args=base_args)
     return status
 
 
-def banner_for(version: str, home: object) -> str:
+def _guarded(action: Callable[[], int]) -> int:
+    """Run ``action`` with the same firewall :func:`invoke` gives commands.
+
+    The job path can fail in ways a command cannot -- a spawn that will not
+    start, a metadata write that loses a race -- and a second Ctrl-C lands
+    while the first one is still inside ``cancel``, which is not instant.
+    None of that may take the session with it.
+    """
+    try:
+        return action()
+    except KeyboardInterrupt:
+        click.echo("^C", err=True)
+        return 130
+    except Exception as exc:  # noqa: BLE001 - the session outlives its jobs
+        click.echo(f"error: {type(exc).__name__}: {exc}", err=True)
+        return 1
+
+
+def banner_for(version: str, home: object, running: int = 0) -> str:
     """Return the greeting: what you are attached to, and how to get out.
 
     ASCII only, deliberately: this is printed on Windows consoles that are still
     running a non-UTF-8 code page, where anything else arrives as mojibake.
     """
-    return (
-        f"task-graph {version} - interactive shell\n"
-        f"state: {home}\n"
-        "Type a tg command without the `tg` (e.g. `triage`, `why <id>`).\n"
-        "`help` lists commands, `exit` leaves."
-    )
+    lines = [
+        f"task-graph {version} - interactive shell",
+        f"state: {home}",
+        "Type a tg command without the `tg` (e.g. `triage`, `why <id>`).",
+        "Slow work (sync, doctor, rebuild, learn) runs as a job: Ctrl-C cancels,",
+        "`sync &` keeps the prompt, and `jobs` / `logs <id>` / `cancel <id>` inspect it.",
+        "`help` lists commands, `exit` leaves.",
+    ]
+    if running:
+        lines.append(f"{running} job(s) still running from earlier - see `jobs`.")
+    return "\n".join(lines)
