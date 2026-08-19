@@ -118,25 +118,39 @@ trade-offs, including why vector search is brute-force numpy rather than
 
 ## CLI
 
+Related things nest, so `tg action --help` shows an action's whole lifecycle
+rather than making you find `actions`, `approve action` and `reject action`
+separately.
+
 | command | what it does |
 | --- | --- |
-| `tg sync` | pull from sources, unify, rank |
-| `tg triage` | ranked open work with explanations |
-| `tg show ID` / `tg why ID` | task detail / priority breakdown |
-| `tg search QUERY` | hybrid lexical + semantic search |
-| `tg merges` | proposed duplicate merges |
-| `tg approve merge ID` / `tg reject merge ID --reason` | decide a merge |
-| `tg actions` | proposed remediations, with previews |
-| `tg approve action ID [--execute]` | grant; `--execute` is what runs it |
-| `tg reject action ID --reason` | decline an action |
-| `tg correct ID --not-a-task/--higher/--lower` | teach it |
-| `tg learn` | fold corrections into the weights |
-| `tg weights` | inspect or set tuning parameters |
-| `tg shell` | interactive prompt; one process, no restart cost |
-| `tg bg CMD` / `tg jobs` / `tg logs ID` / `tg cancel ID` | background work |
-| `tg status` / `tg doctor` / `tg rebuild` / `tg init` | operations |
+| `tg triage` (`t`) | ranked open work with explanations |
+| `tg show ID` / `tg why ID` (`w`) | task detail / priority breakdown |
+| `tg search Q` (`find`) | hybrid lexical + semantic search |
+| `tg correct ID` (`fix`) | teach it |
+| `tg sync` (`pull`) | pull from sources, unify, rank |
+| `tg merge list\|approve\|reject` (`m`) | duplicate decisions |
+| `tg action list\|propose\|preview\|approve\|execute\|reject` (`a`) | proposed remediations |
+| `tg job list\|logs\|cancel\|start` (`j`) | background work |
+| `tg learn` / `tg weights` | fold in corrections / tuning parameters |
+| `tg status` (`st`) / `tg doctor` (`dr`) / `tg rebuild` / `tg init` | operations |
+| `tg shell` | the interactive prompt |
+
+Shortcuts keep the one-word spellings: `jobs`, `logs ID`, `cancel ID`, `bg CMD`,
+`merges`, `actions`. Aliases are explicit and stable rather than prefix
+matching, which would break the day a new command shares a prefix.
 
 Every command supports `--json`.
+
+**Approve and execute are separate, and now actually usable:**
+
+```
+tg action approve r7     # grants permission; changes nothing anywhere
+tg action execute r7     # the step that mutates the source system
+```
+
+`tg action list` shows granted actions as well as pending ones — an approved
+action is exactly the one you still have to execute.
 
 ## Nothing blocks
 

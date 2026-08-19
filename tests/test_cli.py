@@ -164,7 +164,8 @@ def test_approve_action_without_execute_never_executes(runner, isolated_env, mon
 
     result = runner.invoke(main, ["approve", "action", approval_id])
     assert result.exit_code == 0, result.output
-    assert "DRY RUN ONLY" in result.output
+    assert "Nothing has been executed" in result.output
+    assert "action execute" in result.output  # tells you the next step, which now works
     assert calls == []
     with TaskGraphApp(Settings(home=isolated_env, embedding_provider="hashing")) as app:
         assert app.approvals.get(approval_id).data["approval"] == ApprovalState.GRANTED
@@ -258,3 +259,95 @@ def test_empty_graph_commands_are_helpful(runner, args):
     assert result.exit_code == 0, result.output
     assert "Run `tg sync` first" in result.output
     assert "Traceback" not in result.output
+
+
+# --------------------------------------------------------- the command tree
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["t"],                      # alias for a top-level verb
+        ["triage"],
+        ["j", "ls"],                # group alias + subcommand alias
+        ["job", "list"],
+        ["jobs"],                   # supported shortcut
+        ["m", "ls"],
+        ["merge", "list"],
+        ["merges"],                 # supported shortcut
+        ["action", "list"],
+        ["actions"],
+        ["a", "ls"],
+    ],
+)
+def test_every_spelling_of_a_command_works(runner, args):
+    result = runner.invoke(main, args)
+    assert result.exit_code == 0, result.output
+    assert "Traceback" not in result.output
+
+
+def test_root_help_groups_commands_and_advertises_shortcuts(runner):
+    result = runner.invoke(main, ["--help"])
+    assert result.exit_code == 0
+    for section in ("Your work:", "Decisions:", "Background:", "Shortcuts:"):
+        assert section in result.output
+    assert "triage (t)" in result.output
+    assert "same as `job list`" in result.output
+    # The deprecated verb-first groups stay reachable but out of the way.
+    assert "\n  approve " not in result.output
+
+
+def test_an_unknown_command_names_the_canonical_one(runner):
+    result = runner.invoke(main, ["t", "--nope"])
+    assert result.exit_code != 0
+    assert "triage" in result.output
+
+
+def test_approve_grants_without_executing_and_is_idempotent(runner, isolated_env, monkeypatch):
+    approval_id = seed_action(isolated_env)
+    monkeypatch.setattr(
+        ApprovalQueue,
+        "execute_approved",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not execute")),
+    )
+
+    first = runner.invoke(main, ["action", "approve", approval_id])
+    assert first.exit_code == 0, first.output
+    assert "Nothing has been executed" in first.output
+
+    # Re-approving used to be a hard error, which made the advertised
+    # approve-then-execute flow impossible to follow.
+    second = runner.invoke(main, ["action", "approve", approval_id])
+    assert second.exit_code == 0, second.output
+    assert "Already granted" in second.output
+
+
+def test_a_granted_action_is_still_listed(runner, isolated_env):
+    approval_id = seed_action(isolated_env)
+    assert runner.invoke(main, ["action", "approve", approval_id]).exit_code == 0
+
+    listed = runner.invoke(main, ["--json", "action", "list"])
+    assert listed.exit_code == 0
+    assert [row["id"] for row in json.loads(listed.output)] == [approval_id]
+
+
+def test_execute_refuses_without_a_grant(runner, isolated_env, monkeypatch):
+    approval_id = seed_action(isolated_env)
+    monkeypatch.setattr(
+        ApprovalQueue,
+        "execute_approved",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not execute")),
+    )
+    result = runner.invoke(main, ["action", "execute", approval_id])
+    assert result.exit_code != 0
+
+
+def test_action_list_can_filter_by_state(runner, isolated_env):
+    approval_id = seed_action(isolated_env)
+    runner.invoke(main, ["action", "approve", approval_id])
+
+    granted = runner.invoke(main, ["--json", "action", "list", "--state", "granted"])
+    assert [row["id"] for row in json.loads(granted.output)] == [approval_id]
+
+    pending = runner.invoke(main, ["--json", "action", "list", "--state", "pending"])
+    assert json.loads(pending.output) == []

@@ -7,7 +7,7 @@ import os
 import shutil
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -26,7 +26,7 @@ from task_graph.config import (
 )
 from task_graph.jobs import JobRunner
 from task_graph.learning.corrections import LearningReport
-from task_graph.ontology.types import ObjectType
+from task_graph.ontology.types import ApprovalState, ObjectType
 from task_graph.pipeline.approval import ApprovalRequiredError, RemediationExecutionError
 from task_graph.progress import (
     ENV_PROGRESS_FILE,
@@ -132,7 +132,105 @@ def _empty_message(kind: str = "tasks") -> str:
     return f"No {kind} found. Run `tg sync` first."
 
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+class AliasedCommand(click.Command):
+    """A command that also answers to a few stable short names."""
+
+    def __init__(self, *args: Any, aliases: Sequence[str] | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.aliases: list[str] = list(aliases or [])
+
+
+class AliasedGroup(click.Group):
+    """A group whose commands answer to stable alternative names.
+
+    Explicit aliases only -- deliberately not unique-prefix matching. A prefix
+    that resolves today silently stops resolving the day somebody adds a
+    command sharing it, which is a tolerable surprise while typing and an
+    intolerable one in a script or a scheduled sync. Aliases are named, so they
+    keep working.
+    """
+
+    command_class = AliasedCommand
+
+    def __init__(self, *args: Any, aliases: Sequence[str] | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.aliases: list[str] = list(aliases or [])
+        self._alias_map: dict[str, str] = {}
+        #: Optional themed grouping for `--help`, as (title, command names).
+        self.sections: list[tuple[str, list[str]]] = []
+        #: Alternative spellings worth advertising, as name -> canonical path.
+        self.shortcuts: dict[str, str] = {}
+
+    def add_command(self, cmd: click.Command, name: str | None = None) -> None:
+        super().add_command(cmd, name)
+        # Only claim a command's aliases where it lives canonically. The same
+        # object is also registered at the top level as a shortcut (`jobs` for
+        # `job list`), and `tg ls` should not become a thing.
+        if name in (None, cmd.name):
+            for alias in getattr(cmd, "aliases", ()) or ():
+                self._alias_map[alias] = cmd.name or ""
+
+    def get_command(self, ctx: click.Context, name: str) -> click.Command | None:
+        found = super().get_command(ctx, name)
+        if found is not None:
+            return found
+        target = self._alias_map.get(name)
+        return super().get_command(ctx, target) if target else None
+
+    def resolve_command(
+        self, ctx: click.Context, args: list[str]
+    ) -> tuple[str | None, click.Command | None, list[str]]:
+        # Report the canonical name, so an error from `tg t` says `triage`.
+        _, command, rest = super().resolve_command(ctx, args)
+        return (command.name if command else None), command, rest
+
+    def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        """List commands by theme, with their aliases, shortcuts last.
+
+        A flat alphabetical list of everything is how this got hard to read:
+        `actions`, `approve`, `bg`, `cancel` tells you nothing about which
+        things belong together. Sections carry the shape of the tool; the
+        shortcut block at the end says plainly that the short spellings are
+        supported rather than leaving them looking like duplicates.
+        """
+        listed = [
+            name
+            for name in self.list_commands(ctx)
+            if not (super(AliasedGroup, self).get_command(ctx, name) or self).hidden
+        ]
+        sections = self.sections or [("Commands", listed)]
+        placed = {name for _, names in sections for name in names} | set(self.shortcuts)
+
+        for title, names in sections:
+            rows = [row for row in (self._row(ctx, name, formatter) for name in names) if row]
+            if rows:
+                with formatter.section(title):
+                    formatter.write_dl(rows)
+
+        leftovers = [name for name in listed if name not in placed]
+        rows = [row for row in (self._row(ctx, name, formatter) for name in leftovers) if row]
+        if rows:
+            with formatter.section("Other"):
+                formatter.write_dl(rows)
+
+        if self.shortcuts:
+            with formatter.section("Shortcuts"):
+                formatter.write_dl(
+                    [(name, f"same as `{target}`") for name, target in self.shortcuts.items()]
+                )
+
+    def _row(
+        self, ctx: click.Context, name: str, formatter: click.HelpFormatter
+    ) -> tuple[str, str] | None:
+        command = click.Group.get_command(self, ctx, name)
+        if command is None or command.hidden:
+            return None
+        aliases = sorted(a for a, target in self._alias_map.items() if target == name)
+        label = f"{name} ({', '.join(aliases)})" if aliases else name
+        return label, command.get_short_help_str(limit=formatter.width or 80)
+
+
+@click.group(cls=AliasedGroup, context_settings={"help_option_names": ["-h", "--help"]})
 @click.option("--home", type=click.Path(path_type=Path), help="Override TASK_GRAPH_HOME.")
 @click.option("--json/--no-json", "as_json", default=False, help="Emit machine-readable JSON.")
 @click.option("-v", "--verbose", count=True, help="Increase diagnostic output.")
@@ -173,7 +271,7 @@ def _finish(console: ConsoleSink | None) -> None:
         console.clear()
 
 
-@main.command()
+@main.command(cls=AliasedCommand, aliases=["pull"])
 @click.option("--source", "sources", multiple=True, type=click.Choice(["github", "ado", "mail"]))
 @click.option("--since", help="Only sync changes since this ISO timestamp.")
 @click.option("--no-dedupe", is_flag=True, help="Skip dedupe after ingest.")
@@ -207,7 +305,7 @@ def sync(
     _render(ctx, data, report.summary())
 
 
-@main.command()
+@main.command(cls=AliasedCommand, aliases=["t"])
 @click.option("--limit", default=20, show_default=True, type=int)
 @click.pass_context
 def triage(ctx: click.Context, limit: int) -> None:
@@ -217,7 +315,7 @@ def triage(ctx: click.Context, limit: int) -> None:
     _render(ctx, rows, lambda: _format_table(rows))
 
 
-@main.command()
+@main.command(cls=AliasedCommand)
 @click.argument("task_id")
 @click.pass_context
 def show(ctx: click.Context, task_id: str) -> None:
@@ -238,7 +336,7 @@ def show(ctx: click.Context, task_id: str) -> None:
     _render(ctx, data, lambda: _format_task_detail(data))
 
 
-@main.command()
+@main.command(cls=AliasedCommand, aliases=["find"])
 @click.argument("query")
 @click.option("--limit", default=20, show_default=True, type=int)
 @click.pass_context
@@ -249,7 +347,7 @@ def search(ctx: click.Context, query: str, limit: int) -> None:
     _render(ctx, results, lambda: _format_search(results))
 
 
-@main.command()
+@main.command(cls=AliasedCommand, aliases=["w"])
 @click.argument("task_id")
 @click.pass_context
 def why(ctx: click.Context, task_id: str) -> None:
@@ -264,20 +362,54 @@ def why(ctx: click.Context, task_id: str) -> None:
     _render(ctx, data, lambda: _format_breakdown(data))
 
 
-@main.command()
+@main.group(cls=AliasedGroup, aliases=["m"])
+def merge() -> None:
+    """Proposed duplicate merges: list, approve, reject.
+
+    Approving a merge changes the local graph only. It never touches a source
+    system.
+    """
+
+
+@merge.command("list", cls=AliasedCommand, aliases=["ls"])
 @click.pass_context
-def merges(ctx: click.Context) -> None:
+def merge_list(ctx: click.Context) -> None:
     """List pending merge proposals."""
     with _with_app(ctx) as app:
         pending = app.pending_merges()
     _render(ctx, pending, lambda: _format_merges(pending))
 
 
-@main.command()
-@click.option("--task", "task_id", help="Create/show approvals for one task.")
+@main.group(cls=AliasedGroup, aliases=["a"])
+def action() -> None:
+    """Proposed remediations: propose, inspect, approve, then execute.
+
+    Approving grants permission and changes nothing anywhere. `execute` is the
+    step that mutates a source system, and it requires a prior approval.
+    """
+
+
+@action.command("list", cls=AliasedCommand, aliases=["ls"])
+@click.option(
+    "--state",
+    "states",
+    multiple=True,
+    type=click.Choice([s.value for s in ApprovalState]),
+    help="Filter by approval state; repeatable. Defaults to pending and granted.",
+)
+@click.option("--all", "show_all", is_flag=True, help="Every state, including resolved.")
+@click.option("--task", "task_id", help="Propose for one task first, then list.")
 @click.pass_context
-def actions(ctx: click.Context, task_id: str | None) -> None:
-    """List pending remediation approvals and rendered previews."""
+def action_list(
+    ctx: click.Context, states: tuple[str, ...], show_all: bool, task_id: str | None
+) -> None:
+    """List remediation approvals and their rendered previews.
+
+    Pending *and* granted by default: a granted action is precisely the one you
+    still have to execute, and hiding it once approved loses it at the moment
+    it matters.
+    """
+    wanted = _wanted_states(states, show_all)
     with _with_app(ctx) as app:
         if task_id:
             try:
@@ -289,19 +421,51 @@ def actions(ctx: click.Context, task_id: str | None) -> None:
                     _empty_message("task"),
                 )
                 return
-        pending = [_remediation_dict(obj) for obj in app.pending_approvals()]
-    _render(ctx, pending, lambda: _format_actions(pending))
+        found = [_remediation_dict(obj) for obj in app.approvals.by_state(wanted)]
+    _render(ctx, found, lambda: _format_actions(found))
 
 
-@main.group()
-def approve() -> None:
-    """Approve proposed graph changes or actions."""
+def _wanted_states(states: tuple[str, ...], show_all: bool) -> set[ApprovalState] | None:
+    if show_all:
+        return None
+    if states:
+        return {ApprovalState(value) for value in states}
+    return {ApprovalState.PENDING, ApprovalState.GRANTED}
 
 
-@approve.command("merge")
+@action.command("propose")
+@click.argument("task_id")
+@click.pass_context
+def action_propose(ctx: click.Context, task_id: str) -> None:
+    """Propose remediations for one task."""
+    with _with_app(ctx) as app:
+        try:
+            proposed = [_remediation_dict(obj) for obj in app.propose_for(task_id)]
+        except KeyError:
+            _render(ctx, {"error": "task_not_found", "task_id": task_id}, _empty_message("task"))
+            return
+    _render(ctx, proposed, lambda: _format_actions(proposed))
+
+
+@action.command("preview")
+@click.argument("approval_id")
+@click.pass_context
+def action_preview(ctx: click.Context, approval_id: str) -> None:
+    """Show exactly what an action would do, without approving it."""
+    try:
+        with _with_app(ctx) as app:
+            obj = app.approvals.get(approval_id)
+            preview = app.approvals.dry_run(approval_id)
+    except KeyError as exc:
+        raise click.ClickException(str(exc)) from exc
+    data = {"approval_id": approval_id, "state": obj.data.get("approval"), "preview": preview}
+    _render(ctx, data, f"{approval_id} [{data['state']}]\n{preview}")
+
+
+@merge.command("approve")
 @click.argument("patch_id")
 @click.pass_context
-def approve_merge(ctx: click.Context, patch_id: str) -> None:
+def merge_approve(ctx: click.Context, patch_id: str) -> None:
     """Approve and apply a pending merge proposal."""
     try:
         with _with_app(ctx) as app:
@@ -312,54 +476,70 @@ def approve_merge(ctx: click.Context, patch_id: str) -> None:
     _render(ctx, data, f"Approved merge {patch_id}; canonical task is {canonical}.")
 
 
-@approve.command("action")
+@action.command("approve")
 @click.argument("approval_id")
-@click.option(
-    "--execute",
-    is_flag=True,
-    help=(
-        "Actually run the source-system mutation. WITHOUT THIS FLAG tg only grants "
-        "approval and prints the preview; it does not execute anything."
-    ),
-)
 @click.pass_context
-def approve_action(ctx: click.Context, approval_id: str, execute: bool) -> None:
-    """Grant an action approval. Does NOT execute unless --execute is present."""
+def action_approve(ctx: click.Context, approval_id: str) -> None:
+    """Grant permission to run an action. Executes nothing.
+
+    Granting is idempotent: approving something already granted tells you so
+    and points at `execute`, rather than failing the way re-running the old
+    `approve action --execute` did.
+    """
     try:
         with _with_app(ctx) as app:
-            granted = app.approvals.grant(approval_id, approved_by="cli")
+            current = app.approvals.get(approval_id)
+            already = current.data.get("approval") == ApprovalState.GRANTED
+            granted = current if already else app.approvals.grant(approval_id, approved_by="cli")
             preview = app.approvals.dry_run(approval_id)
-            executed = None
-            if execute:
-                executed = app.approvals.execute_approved(approval_id, actor="cli")
+    except (KeyError, ApprovalRequiredError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    data = {
+        "approval_id": approval_id,
+        "approval": granted.data.get("approval"),
+        "executed": False,
+        "already_granted": already,
+        "preview": preview,
+    }
+    lead = "Already granted" if already else "Granted approval for"
+    _render(
+        ctx,
+        data,
+        f"{lead} {approval_id}. Nothing has been executed.\n"
+        f"Run `tg action execute {approval_id}` to mutate the source system.\n"
+        f"Preview: {preview}",
+    )
+
+
+@action.command("execute")
+@click.argument("approval_id")
+@click.pass_context
+def action_execute(ctx: click.Context, approval_id: str) -> None:
+    """Run an approved action. THIS MUTATES THE SOURCE SYSTEM.
+
+    Requires a prior `action approve`, and refuses anything already executed.
+    """
+    try:
+        with _with_app(ctx) as app:
+            preview = app.approvals.dry_run(approval_id)
+            executed = app.approvals.execute_approved(approval_id, actor="cli")
     except (KeyError, ApprovalRequiredError, RemediationExecutionError) as exc:
         raise click.ClickException(str(exc)) from exc
     data = {
         "approval_id": approval_id,
-        "approval": (executed or granted).data.get("approval"),
-        "executed": execute,
+        "approval": executed.data.get("approval"),
+        "executed": True,
+        "outcome": executed.data.get("outcome"),
         "preview": preview,
     }
-    text = (
-        f"Granted approval for {approval_id}.\n"
-        f"DRY RUN ONLY: not executed. Re-run with --execute to mutate the source system.\n"
-        f"Preview: {preview}"
-        if not execute
-        else f"Executed approved action {approval_id}.\nPreview: {preview}"
-    )
-    _render(ctx, data, text)
+    _render(ctx, data, f"Executed {approval_id}.\nOutcome: {data['outcome']}")
 
 
-@main.group()
-def reject() -> None:
-    """Reject proposed graph changes or actions."""
-
-
-@reject.command("merge")
+@merge.command("reject")
 @click.argument("patch_id")
 @click.option("--reason", required=True, help="Why this merge is wrong.")
 @click.pass_context
-def reject_merge(ctx: click.Context, patch_id: str, reason: str) -> None:
+def merge_reject(ctx: click.Context, patch_id: str, reason: str) -> None:
     """Reject a pending merge proposal."""
     try:
         with _with_app(ctx) as app:
@@ -370,11 +550,11 @@ def reject_merge(ctx: click.Context, patch_id: str, reason: str) -> None:
     _render(ctx, data, f"Rejected merge {patch_id}: {reason}")
 
 
-@reject.command("action")
+@action.command("reject")
 @click.argument("approval_id")
 @click.option("--reason", required=True, help="Why this action should not run.")
 @click.pass_context
-def reject_action(ctx: click.Context, approval_id: str, reason: str) -> None:
+def action_reject(ctx: click.Context, approval_id: str, reason: str) -> None:
     """Reject a pending remediation approval."""
     try:
         with _with_app(ctx) as app:
@@ -385,7 +565,50 @@ def reject_action(ctx: click.Context, approval_id: str, reason: str) -> None:
     _render(ctx, data, f"Rejected action {approval_id}: {reason}")
 
 
-@main.command()
+@main.group(hidden=True)
+def approve() -> None:
+    """Deprecated: use `tg merge approve` / `tg action approve`."""
+
+
+@main.group(hidden=True)
+def reject() -> None:
+    """Deprecated: use `tg merge reject` / `tg action reject`."""
+
+
+@approve.command("action")
+@click.argument("approval_id")
+@click.option(
+    "--execute",
+    is_flag=True,
+    help="Deprecated. Grant and run in one step; prefer `tg action execute`.",
+)
+@click.pass_context
+def approve_action_legacy(ctx: click.Context, approval_id: str, execute: bool) -> None:
+    """Deprecated: use `tg action approve`, then `tg action execute`."""
+    if not execute:
+        ctx.invoke(action_approve, approval_id=approval_id)
+        return
+    click.echo(
+        "warning: `approve action --execute` grants and runs in one step, which is "
+        "exactly the separation this tool promises. Use `tg action approve "
+        f"{approval_id}` then `tg action execute {approval_id}`.",
+        err=True,
+    )
+    ctx.invoke(action_approve, approval_id=approval_id)
+    ctx.invoke(action_execute, approval_id=approval_id)
+
+
+# The same command objects, reachable the way they always were. These are
+# supported shortcuts rather than deprecated spellings: `logs 3` at a prompt
+# should not have to become `job logs 3`.
+approve.add_command(merge_approve, "merge")
+reject.add_command(merge_reject, "merge")
+reject.add_command(action_reject, "action")
+main.add_command(merge_list, "merges")
+main.add_command(action_list, "actions")
+
+
+@main.command(cls=AliasedCommand, aliases=["fix"])
 @click.argument("task_id")
 @click.option("--not-a-task", "not_a_task", is_flag=True, help="Drop this item from open work.")
 @click.option("--higher", is_flag=True, help="Teach that this task should rank higher.")
@@ -456,7 +679,7 @@ def weights(ctx: click.Context, assignment: str | None) -> None:
     _render(ctx, data, lambda: _format_weights(data))
 
 
-@main.command()
+@main.command(cls=AliasedCommand, aliases=["st"])
 @click.pass_context
 def status(ctx: click.Context) -> None:
     """Show local graph status."""
@@ -465,7 +688,7 @@ def status(ctx: click.Context) -> None:
     _render(ctx, data, lambda: "\n".join(f"{k}: {v}" for k, v in data.items()))
 
 
-@main.command()
+@main.command(cls=AliasedCommand, aliases=["dr"])
 @click.pass_context
 def doctor(ctx: click.Context) -> None:
     """Run environment and storage diagnostics."""
@@ -550,86 +773,98 @@ def _inherited_args(ctx: click.Context) -> list[str]:
     return args
 
 
-@main.command(
-    "bg",
-    # Everything after `bg` belongs to the job, not to bg. Without this Click
-    # tries to resolve `--propose` as an option of bg itself and refuses, which
-    # breaks every command worth backgrounding.
+@main.group(cls=AliasedGroup, aliases=["j"])
+def job() -> None:
+    """Background jobs: what is running, what it printed, and how to stop it."""
+
+
+@job.command(
+    "start",
+    # Everything after this belongs to the job, not to `start`. Without it
+    # Click tries to resolve `--propose` as an option of `start` and refuses,
+    # which breaks every command worth backgrounding.
     context_settings={"ignore_unknown_options": True, "allow_interspersed_args": False},
 )
 @click.argument("command", nargs=-1, required=True, type=click.UNPROCESSED)
 @click.pass_context
-def bg(ctx: click.Context, command: tuple[str, ...]) -> None:
+def job_start(ctx: click.Context, command: tuple[str, ...]) -> None:
     """Start a tg command as a background job and return immediately.
 
-    Everything after `bg` is passed through untouched, so
-    `tg bg sync --propose` runs exactly the sync you would have typed.
+    Everything after this is passed through untouched, so
+    `tg job start sync --propose` runs exactly the sync you would have typed.
     """
     runner = _job_runner(ctx)
-    job = runner.submit([*_inherited_args(ctx), *command])
-    data = job.to_dict()
-    _render(ctx, data, f"Started job {job.id}: {job.label}")
+    job_record = runner.submit([*_inherited_args(ctx), *command])
+    _render(ctx, job_record.to_dict(), f"Started job {job_record.id}: {job_record.label}")
 
 
-@main.command("jobs")
+@job.command("list", cls=AliasedCommand, aliases=["ls"])
 @click.option("--all", "show_all", is_flag=True, help="Include finished jobs.")
 @click.option("--limit", default=15, show_default=True, type=int)
 @click.pass_context
-def jobs_cmd(ctx: click.Context, show_all: bool, limit: int) -> None:
+def job_list(ctx: click.Context, show_all: bool, limit: int) -> None:
     """List background jobs and what they are doing."""
     runner = _job_runner(ctx)
     found = runner.list(limit=limit, running_only=not show_all)
-    rows = [job.to_dict() for job in found]
+    rows = [record.to_dict() for record in found]
     _render(ctx, rows, lambda: _format_jobs(rows, show_all=show_all))
 
 
-@main.command("logs")
+@job.command("logs")
 @click.argument("job_id")
 @click.option("--follow", "-f", is_flag=True, help="Keep printing until the job ends.")
 @click.option("--tail", "-n", type=int, default=None, help="Only the last N lines.")
 @click.pass_context
-def logs_cmd(ctx: click.Context, job_id: str, follow: bool, tail: int | None) -> None:
+def job_logs(ctx: click.Context, job_id: str, follow: bool, tail: int | None) -> None:
     """Show a job's captured output."""
     runner = _job_runner(ctx)
     try:
-        job = runner.get(job_id)
+        record = runner.get(job_id)
     except KeyError as exc:
         raise click.ClickException(str(exc)) from exc
 
     if not follow:
-        text = job.read_log(tail=tail)
-        _render(ctx, {"id": job.id, "log": text}, text or "(no output yet)")
+        text = record.read_log(tail=tail)
+        _render(ctx, {"id": record.id, "log": text}, text or "(no output yet)")
         return
 
     offset = 0
-    click.echo(f"--- job {job.id}: {job.label} (Ctrl-C to stop watching) ---")
+    click.echo(f"--- job {record.id}: {record.label} (Ctrl-C to stop watching) ---")
     try:
         while True:
-            job = runner.get(job_id)
-            text = job.read_log()
+            record = runner.get(job_id)
+            text = record.read_log()
             if len(text) > offset:
                 click.echo(text[offset:], nl=False)
                 offset = len(text)
-            if not job.is_running:
+            if not record.is_running:
                 break
             time.sleep(0.3)
     except KeyboardInterrupt:
         click.echo("\n(stopped watching; the job is still running)")
         return
-    click.echo(f"--- job {job.id} {job.state} ---")
+    click.echo(f"--- job {record.id} {record.state} ---")
 
 
-@main.command("cancel")
+@job.command("cancel")
 @click.argument("job_id")
 @click.pass_context
-def cancel_cmd(ctx: click.Context, job_id: str) -> None:
+def job_cancel(ctx: click.Context, job_id: str) -> None:
     """Stop a running job and everything it started."""
     runner = _job_runner(ctx)
     try:
-        job = runner.cancel(job_id)
+        record = runner.cancel(job_id)
     except KeyError as exc:
         raise click.ClickException(str(exc)) from exc
-    _render(ctx, job.to_dict(), f"Job {job.id} {job.state}.")
+    _render(ctx, record.to_dict(), f"Job {record.id} {record.state}.")
+
+
+# Supported shortcuts, not deprecated spellings: `logs 3` at a prompt should
+# not have to become `job logs 3`. Same objects, two paths.
+main.add_command(job_list, "jobs")
+main.add_command(job_logs, "logs")
+main.add_command(job_cancel, "cancel")
+main.add_command(job_start, "bg")
 
 
 def _job_runner(ctx: click.Context) -> JobRunner:
@@ -923,6 +1158,27 @@ def _mcp_server_config(settings: Settings) -> dict[str, Any]:
             "TASK_GRAPH_EMBEDDINGS": settings.embedding_provider,
         },
     }
+
+
+# How `tg --help` reads. Declared here, after every command exists, so the
+# grouping is one legible statement of the tool's shape rather than an accident
+# of definition order.
+main.sections = [
+    ("Your work", ["triage", "show", "why", "search", "correct"]),
+    ("Sources", ["sync"]),
+    ("Decisions", ["merge", "action"]),
+    ("Background", ["job"]),
+    ("Learning", ["learn", "weights"]),
+    ("Operations", ["status", "doctor", "rebuild", "init", "shell"]),
+]
+main.shortcuts = {
+    "jobs": "job list",
+    "logs": "job logs",
+    "cancel": "job cancel",
+    "bg": "job start",
+    "merges": "merge list",
+    "actions": "action list",
+}
 
 
 if __name__ == "__main__":

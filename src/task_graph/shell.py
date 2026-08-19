@@ -24,13 +24,14 @@ from __future__ import annotations
 import shlex
 import sys
 import time
+import warnings
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from functools import partial
 from typing import Any
 
 import click
 
-from task_graph.jobs import Job, JobRunner, is_job_command
+from task_graph.jobs import Job, JobRunner, runs_as_job
 from task_graph.progress import ConsoleSink, iter_events
 
 PROMPT = "tg> "
@@ -75,6 +76,61 @@ def normalise(argv: Sequence[str]) -> list[str]:
         # page you actually wanted.
         return [*args[1:], "--help"]
     return args
+
+
+#: Where `parse_args` leaves the subcommand name moved between Click versions:
+#: 8.x puts it in the now-deprecated `Context.protected_args` and leaves
+#: `ctx.args` empty, while Click 9 will put everything in `ctx.args`. Reading
+#: the deprecated attribute warns, and this project promotes DeprecationWarning
+#: to an error, so the read is deliberately silenced rather than avoided --
+#: there is no other supported way to ask 8.x the question.
+def _remaining_args(ctx: click.Context) -> list[str]:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        protected = list(getattr(ctx, "protected_args", None) or [])
+    return [*protected, *ctx.args]
+
+
+def resolve_path(group: click.Group, argv: Sequence[str]) -> tuple[str, ...]:
+    """Resolve ``argv`` to the canonical command path Click would dispatch.
+
+    Walks the group tree using Click's own parser, so aliases resolve to their
+    real names, nested paths come back whole, and an option's value is never
+    mistaken for a command -- ``--home C:\\graph sync`` resolves to
+    ``("sync",)`` rather than to the path.
+
+    Parsing is resilient, so an incomplete or invalid line yields the longest
+    prefix that did resolve instead of raising. The caller only wants to know
+    where this was heading; reporting the error is Click's job, later.
+    """
+    args = list(argv)
+    node: click.Command = group
+    path: list[str] = []
+
+    while isinstance(node, click.Group):
+        ctx = click.Context(node, info_name=node.name, resilient_parsing=True)
+        try:
+            node.parse_args(ctx, list(args))
+        except Exception:  # noqa: BLE001 - a line we cannot parse has no path
+            break
+        remaining = _remaining_args(ctx)
+        if not remaining:
+            break
+        token = remaining[0]
+        # A shortcut is the same command object registered under a second name,
+        # so its own `.name` is the one from its canonical home ("list", not
+        # "jobs"). Expand it here or `jobs` would resolve to ("list",).
+        shortcut = (getattr(node, "shortcuts", None) or {}).get(token)
+        if shortcut:
+            return (*path, *shortcut.split())
+        sub = node.get_command(ctx, token)
+        if sub is None:
+            break
+        path.append(sub.name or token)
+        node = sub
+        args = remaining[1:]
+
+    return tuple(path)
 
 
 def split_background(argv: Sequence[str]) -> tuple[list[str], bool]:
@@ -275,7 +331,7 @@ def run_shell(
         argv, background = split_background(argv)
         if not argv:
             continue
-        if runner is not None and is_job_command(argv):
+        if runner is not None and runs_as_job(resolve_path(group, argv), argv):
             status = _guarded(
                 partial(
                     start_job,
@@ -318,10 +374,14 @@ def banner_for(version: str, home: object, running: int = 0) -> str:
     lines = [
         f"task-graph {version} - interactive shell",
         f"state: {home}",
-        "Type a tg command without the `tg` (e.g. `triage`, `why <id>`).",
-        "Slow work (sync, doctor, rebuild, learn) runs as a job: Ctrl-C cancels,",
-        "`sync &` keeps the prompt, and `jobs` / `logs <id>` / `cancel <id>` inspect it.",
-        "`help` lists commands, `exit` leaves.",
+        "Type a tg command without the `tg`. Related things nest:",
+        "  triage / show / why / search        what to do, and why",
+        "  merge list|approve|reject           (m) duplicate decisions",
+        "  action list|approve|execute         (a) proposed remediations",
+        "  job list|logs|cancel|start          (j) background work",
+        "Shortcuts: jobs, logs <id>, cancel <id>, merges, actions.",
+        "Slow work runs as a job: Ctrl-C cancels, `sync &` keeps the prompt.",
+        "`help` lists everything, `exit` leaves.",
     ]
     if running:
         lines.append(f"{running} job(s) still running from earlier - see `jobs`.")

@@ -38,6 +38,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -54,10 +55,40 @@ STATE_LOST = "lost"
 
 TERMINAL_STATES = frozenset({STATE_SUCCEEDED, STATE_FAILED, STATE_CANCELLED, STATE_LOST})
 
-#: Commands worth running as a job. Everything else in the CLI is a local SQLite
-#: read that finishes in single-digit milliseconds, and making those wait for a
-#: process spawn would be strictly worse than what they do now.
-JOB_COMMANDS = frozenset({"sync", "doctor", "rebuild", "learn"})
+#: Canonical command paths that run as jobs, as Click resolves them. Matching
+#: on resolved paths rather than raw words is what lets `a execute`, `action
+#: execute` and `--home C:\graph sync` all route the same way -- the last of
+#: which used to run inline and block the prompt, because the option's *value*
+#: was the first word that did not start with a dash.
+JOB_COMMAND_PATHS: frozenset[tuple[str, ...]] = frozenset(
+    {
+        ("sync",),
+        ("doctor",),
+        ("rebuild",),
+        ("learn",),
+        ("action", "execute"),
+    }
+)
+
+
+def is_job_path(path: Sequence[str]) -> bool:
+    """Should this resolved command path run as a background job?"""
+    return tuple(path) in JOB_COMMAND_PATHS
+
+
+def runs_as_job(path: Sequence[str], argv: Sequence[str]) -> bool:
+    """As :func:`is_job_path`, plus the one deprecated spelling that mutates.
+
+    ``approve action ID --execute`` still grants and runs in a single step. It
+    reaches a source system, so it has to be a job like anything else that
+    does -- while a bare ``approve action ID`` is a local write and stays
+    inline. This is the only place a flag decides, and it exists only until
+    that spelling goes away.
+    """
+    if is_job_path(path):
+        return True
+    return tuple(path) == ("approve", "action") and "--execute" in argv
+
 
 _META = "meta.json"
 _LOG = "log.txt"
@@ -77,22 +108,6 @@ _KERNEL32: Any = None
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
-
-
-def is_job_command(argv: list[str]) -> bool:
-    """Decide whether an argument list should run as a job.
-
-    Group options may come first (``--json sync``), so this looks for the first
-    bare word. ``approve action --execute`` is included because executing a
-    remediation calls out to a source system and can block just as long as a
-    sync; plain ``approve`` only writes locally.
-    """
-    words = [arg for arg in argv if not arg.startswith("-")]
-    if not words:
-        return False
-    if words[0] in JOB_COMMANDS:
-        return True
-    return words[0] == "approve" and "--execute" in argv
 
 
 @dataclass
@@ -440,10 +455,16 @@ class JobRunner:
         ``Popen.__del__`` ever running, so the interpreter's own late cleanup
         never happens either and a POSIX child stays a zombie for the life of
         the shell. ``poll()`` is non-blocking and is the call that reaps it.
+
+        The child records its terminal state just *before* it exits, so a job
+        can read as finished while its process is still winding down. Dropping
+        the handle then would lose the only thing that can reap it, so it is
+        kept until the exit is observed -- the next read collects it.
         """
-        owned = self._processes.pop(job_id, None)
-        if owned is not None:
-            owned.poll()
+        owned = self._processes.get(job_id)
+        if owned is None or owned.poll() is None:
+            return
+        self._processes.pop(job_id, None)
 
     def _alive(self, job: Job) -> bool:
         """Is this job's process still running?

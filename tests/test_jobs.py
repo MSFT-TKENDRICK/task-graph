@@ -26,9 +26,9 @@ from task_graph.jobs import (
     STATE_SUCCEEDED,
     Job,
     JobRunner,
-    is_job_command,
     pid_alive,
     process_start_token,
+    runs_as_job,
     write_meta,
 )
 from task_graph.progress import (
@@ -42,7 +42,7 @@ from task_graph.progress import (
     null_reporter,
     reporter_from_env,
 )
-from task_graph.shell import run_shell, split_background
+from task_graph.shell import resolve_path, run_shell, split_background
 
 
 @pytest.fixture(autouse=True)
@@ -199,17 +199,48 @@ def _events(tmp_path):
         (["rebuild"], True),
         (["learn"], True),
         (["--json", "sync", "--propose"], True),
-        (["approve", "action", "a1", "--execute"], True),
-        (["approve", "action", "a1"], False),
+        # The option's value used to be read as the command name, so this ran
+        # inline and froze the prompt.
+        (["--home", r"C:\graph", "sync"], True),
+        (["pull"], True),  # alias
+        (["action", "execute", "a1"], True),
+        (["a", "execute", "a1"], True),  # group alias
+        (["approve", "action", "a1", "--execute"], True),  # deprecated but still mutates
+        (["approve", "action", "a1"], False),  # grant only, local
+        (["action", "approve", "a1"], False),
         (["triage"], False),
+        (["t"], False),
         (["show", "task-1"], False),
-        (["search", "sync"], False),
+        (["search", "sync"], False),  # the word sync as an argument, not a command
+        (["jobs"], False),
+        (["logs", "3"], False),
         ([], False),
         (["--json"], False),
+        (["nonsense"], False),
     ],
 )
 def test_only_blocking_commands_become_jobs(argv, expected):
-    assert is_job_command(argv) is expected
+    assert runs_as_job(resolve_path(main, argv), argv) is expected
+
+
+@pytest.mark.parametrize(
+    ("argv", "path"),
+    [
+        (["t"], ("triage",)),
+        (["pull"], ("sync",)),
+        (["j", "ls"], ("job", "list")),
+        (["jobs"], ("job", "list")),  # shortcut expands to its canonical path
+        (["logs", "3"], ("job", "logs")),
+        (["bg", "sync"], ("job", "start")),
+        (["merges"], ("merge", "list")),
+        (["actions"], ("action", "list")),
+        (["m", "approve", "p1"], ("merge", "approve")),
+        (["--home", r"C:\graph", "sync"], ("sync",)),
+        (["nonsense"], ()),
+    ],
+)
+def test_paths_resolve_through_aliases_and_shortcuts(argv, path):
+    assert resolve_path(main, argv) == path
 
 
 @pytest.mark.parametrize(
@@ -346,12 +377,17 @@ def test_meta_survives_a_transient_reader(runner):
 
 
 def test_a_finished_job_releases_its_process_handle(runner):
-    """Holding the handle past completion is a zombie leak, not caution."""
+    """Holding the handle past completion is a zombie leak, not caution.
+
+    The child writes its result just before exiting, so the handle is released
+    on the first read *after* the process actually goes -- not necessarily the
+    read that first sees a terminal state.
+    """
     job = runner.submit(["status"])
     owned = runner._processes[job.id]
     _wait(runner, job.id)
 
-    assert job.id not in runner._processes, "handle retained after completion"
+    _await(lambda: runner.get(job.id) and job.id not in runner._processes)
     assert owned.returncode is not None, "child was never reaped"
 
 

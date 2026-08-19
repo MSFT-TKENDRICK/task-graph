@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -35,6 +35,20 @@ class ApprovalQueue:
             obj
             for obj in self.graph.objects(ObjectType.REMEDIATION)
             if obj.data.get("approval") == ApprovalState.PENDING
+        ]
+
+    def by_state(self, states: Iterable[ApprovalState] | None = None) -> list[Object]:
+        """Remediations in any of ``states``, or all of them when None.
+
+        Listing only pending ones loses a granted action at exactly the moment
+        it matters: granting is the step that makes it executable, so that is
+        when you most need to find it again.
+        """
+        wanted = None if states is None else {ApprovalState(s) for s in states}
+        return [
+            obj
+            for obj in self.graph.objects(ObjectType.REMEDIATION)
+            if wanted is None or obj.data.get("approval") in wanted
         ]
 
     def get(self, remediation_id: str) -> Object:

@@ -146,22 +146,54 @@ schtasks /create /tn "task-graph sync" /tr "C:\path\to\.venv\Scripts\tg.exe sync
 tg> triage                      # what to do next, and why
 tg> why <task-id>               # the full factor breakdown
 tg> merges                      # duplicates awaiting your call
-tg> approve merge <patch-id>
-tg> reject merge <patch-id> --reason "different releases"
+tg> merge approve <patch-id>
+tg> merge reject <patch-id> --reason "different releases"
+tg> actions                     # proposed remediations
+tg> action approve <id>         # grants permission; executes nothing
+tg> action execute <id>         # the step that mutates the source system
 tg> correct <task-id> --not-a-task --reason "newsletter"
 tg> learn                       # fold those corrections into the weights
 tg> exit
 ```
 
+Commands nest by the thing they act on, so `merge --help`, `action --help` and
+`job --help` each show one lifecycle whole. Aliases are short and explicit —
+`t` triage, `w` why, `m` merge, `a` action, `j` job, `fix` correct, `pull`
+sync — and the one-word spellings still work as shortcuts: `jobs`, `logs 3`,
+`cancel 3`, `merges`, `actions`.
+
+Aliases are deliberately *not* prefix matching. A prefix that resolves today
+stops resolving the day a new command shares it, which is a shrug while typing
+and a broken scheduled sync in a script.
+
 The shell is the same CLI dispatched inside one process, so only the first
 command pays the import cost. A leading `tg` is accepted and ignored, `help`
 lists the commands, group options work (`--json triage`), and a command that
-fails prints its error and leaves you at the prompt. Anything you can type
-there also works as `tg <command>` or `.\run.ps1 <command>`, and
-`tg shell -c triage -c merges` runs a fixed sequence without prompting.
+fails prints its error and leaves you at the prompt.
 
 Corrections only change behaviour after `learn`, which reports exactly which
 weights moved.
+
+## Approving and executing
+
+These are two steps on purpose, and the split is real: approving grants
+permission and touches nothing, while `execute` is the only thing that writes
+to a source system.
+
+```powershell
+tg action list             # pending and granted
+tg action preview r7       # exactly what it would do
+tg action approve r7       # grants; nothing happens anywhere
+tg action execute r7       # mutates the source system
+```
+
+`action list` deliberately shows granted actions alongside pending ones: a
+granted action is precisely the one still waiting to be executed, so hiding it
+at the moment of approval loses it when it matters most.
+
+`approve action ID --execute` still works and warns. It grants and runs in one
+step, which is the separation this tool exists to provide, so prefer the two
+commands.
 
 ## Background jobs
 
