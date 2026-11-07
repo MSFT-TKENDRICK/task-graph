@@ -159,6 +159,16 @@ command that gets you the prompt. Force either with `TASK_GRAPH_RUN_INTERACTIVE`
 `approve_action` grants permission and explicitly does not execute;
 `execute_action` requires a prior grant.
 
+### Read-only mode
+
+For unattended consumers such as dashboards, start the server with
+`task-graph-mcp --read-only` (or set `TASK_GRAPH_MCP_READ_ONLY=1`). Only
+`list_tasks`, `get_task`, `search_tasks`, `get_task_graph`, `explain_priority`,
+`list_pending_merges`, `list_pending_approvals` and `get_status` are listed.
+Every other tool is refused with error type `read_only`, so a read-only client
+cannot sync sources, approve, execute or learn. Pair it with
+`TASK_GRAPH_EMBEDDINGS=hashing` to skip the Foundry Local probe.
+
 ## Data
 
 Everything lives in `~/.task-graph/` (override with `TASK_GRAPH_HOME`):

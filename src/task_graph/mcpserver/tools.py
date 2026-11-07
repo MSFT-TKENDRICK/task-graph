@@ -476,3 +476,23 @@ TOOLS: tuple[ToolSpec, ...] = (
 )
 
 TOOLS_BY_NAME = {tool.name: tool for tool in TOOLS}
+
+# Tools that never mutate local state or contact a source system. A read-only
+# server (``--read-only`` / ``TASK_GRAPH_MCP_READ_ONLY=1``) exposes only these,
+# so dashboards and other unattended consumers cannot sync, approve or execute.
+READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "list_tasks",
+        "get_task",
+        "search_tasks",
+        "get_task_graph",
+        "explain_priority",
+        "list_pending_merges",
+        "list_pending_approvals",
+        "get_status",
+    }
+)
+
+READ_ONLY_TOOLS: tuple[ToolSpec, ...] = tuple(
+    tool for tool in TOOLS if tool.name in READ_ONLY_TOOL_NAMES
+)
